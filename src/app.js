@@ -56,7 +56,55 @@ function windowsCandidates(name) {
   return [...new Set(out)];
 }
 
+function findPackagedWindowsApp(names) {
+  const wanted = new Set(names.map((n) => normalizeName(n).toLowerCase()));
+  const script = [
+    '$items = Get-AppxPackage -ErrorAction SilentlyContinue |',
+    "Where-Object { $_.Name -like 'OpenAI.*' -and $_.Status -eq 'Ok' } |",
+    'ForEach-Object { [pscustomobject]@{ Name=$_.Name; PackageFamilyName=$_.PackageFamilyName; InstallLocation=$_.InstallLocation; Version=$_.Version.ToString() } }',
+    '$items | ConvertTo-Json -Compress',
+  ].join(' ');
+  try {
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 8000,
+      maxBuffer: 4 * 1024 * 1024,
+    }).trim();
+    if (!out) return null;
+    const parsed = JSON.parse(out);
+    const pkgs = Array.isArray(parsed) ? parsed : [parsed];
+    for (const pkg of pkgs) {
+      const candidates = [
+        ['ChatGPT', path.join(pkg.InstallLocation, 'app', 'ChatGPT.exe')],
+        ['Codex', path.join(pkg.InstallLocation, 'app', 'Codex.exe')],
+      ];
+      for (const [name, exe] of candidates) {
+        if (!wanted.has(name.toLowerCase()) && wanted.size) continue;
+        try {
+          if (fs.existsSync(exe) && fs.statSync(exe).isFile()) {
+            return {
+              name,
+              path: exe,
+              packaged: true,
+              packageFamilyName: pkg.PackageFamilyName,
+              packageName: pkg.Name,
+              packageVersion: pkg.Version,
+              appId: 'App',
+            };
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+  return null;
+}
+
 function findWindowsApp(names) {
+  // Microsoft Store/MSIX 版本必须优先按包身份识别，不能把 WindowsApps 里的 exe 当普通程序启动。
+  const packaged = findPackagedWindowsApp(names);
+  if (packaged) return packaged;
+
   for (const name of names) {
     for (const candidate of windowsCandidates(name)) {
       try {
