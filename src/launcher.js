@@ -1,6 +1,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { isPortOpen } from './cdp.js';
@@ -88,16 +89,30 @@ export async function quitApp(app, timeoutMs = 20000) {
 }
 
 function resolveWindowsPackageIdentity(exePath) {
-  const script = [
-    `$target=[IO.Path]::GetFullPath(${psQuote(exePath)})`,
-    '$pkg = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object {',
-    '  $_.InstallLocation -and $target.StartsWith([IO.Path]::GetFullPath($_.InstallLocation), [StringComparison]::OrdinalIgnoreCase)',
-    '} | Select-Object -First 1',
-    "if ($pkg) { [pscustomobject]@{ PackageFamilyName=$pkg.PackageFamilyName; Name=$pkg.Name; Version=$pkg.Version.ToString() } | ConvertTo-Json -Compress }",
-  ].join(' ');
+  const script = `
+$target=[IO.Path]::GetFullPath(${psQuote(exePath)})
+$pkg = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object {
+  $_.InstallLocation -and $target.StartsWith([IO.Path]::GetFullPath($_.InstallLocation), [StringComparison]::OrdinalIgnoreCase)
+} | Select-Object -First 1
+if ($pkg) {
+  $manifest = Get-AppxPackageManifest -Package $pkg
+  $apps = @($manifest.Package.Applications.Application)
+  $app = $apps | Where-Object {
+    $candidate = Join-Path $pkg.InstallLocation ([string]$_.Executable)
+    [IO.Path]::GetFullPath($candidate).Equals($target, [StringComparison]::OrdinalIgnoreCase)
+  } | Select-Object -First 1
+  if (-not $app) { $app = $apps | Select-Object -First 1 }
+  [pscustomobject]@{
+    PackageFamilyName=$pkg.PackageFamilyName
+    Name=$pkg.Name
+    Version=$pkg.Version.ToString()
+    AppId=[string]$app.Id
+  } | ConvertTo-Json -Compress
+}
+`;
   try {
     const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      encoding: 'utf8', windowsHide: true, timeout: 8000,
+      encoding: 'utf8', windowsHide: true, timeout: 10000,
     }).trim();
     return out ? JSON.parse(out) : null;
   } catch {
@@ -105,17 +120,62 @@ function resolveWindowsPackageIdentity(exePath) {
   }
 }
 
+export function findRunningWindowsDebugPort() {
+  if (process.platform !== 'win32') return 0;
+  const script = `
+$ports = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -in @('ChatGPT.exe','Codex.exe') -and $_.CommandLine } |
+  ForEach-Object {
+    foreach ($m in [regex]::Matches([string]$_.CommandLine, '--remote-debugging-port(?:=|\\s+)(\\d+)')) {
+      [int]$m.Groups[1].Value
+    }
+  } | Select-Object -Unique
+$ports -join [Environment]::NewLine
+`;
+  try {
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8', windowsHide: true, timeout: 5000,
+    });
+    return out.split(/\\r?\\n/).map((x) => Number(x.trim())).find((x) => x >= 1024 && x <= 65535) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function canBindLoopback(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.unref();
+    server.once('error', () => resolve(false));
+    server.listen({ host: '127.0.0.1', port, exclusive: true }, () => {
+      server.close(() => resolve(true));
+    });
+  });
+}
+
+export async function resolveWindowsDebugPort(preferred, searchCount = 20) {
+  if (process.platform !== 'win32') return preferred;
+  const running = findRunningWindowsDebugPort();
+  if (running && await isPortOpen(running)) return running;
+  for (let i = 0; i < searchCount; i++) {
+    const candidate = Number(preferred) + i;
+    if (candidate > 65535) break;
+    if (await canBindLoopback(candidate)) return candidate;
+  }
+  throw new Error(`从端口 ${preferred} 开始没有找到可用的本机调试端口`);
+}
+
 function launchPackagedWindowsApp(app, port) {
   const identity = app.packageFamilyName ? app : resolveWindowsPackageIdentity(app.path);
   const family = identity?.packageFamilyName || identity?.PackageFamilyName;
-  const appId = app.appId || 'App';
-  if (!family) throw new Error('无法确认 Windows package identity，已停止启动以避免破坏原客户端 UI');
+  const appId = app.appId || identity?.AppId;
+  if (!family || !appId) throw new Error('无法确认 Windows package identity / AppId，已停止启动以避免破坏原客户端 UI');
 
   // 通过 Windows 官方 IApplicationActivationManager 激活 Store/MSIX 应用。
   // 这与直接执行 WindowsApps 里的 ChatGPT.exe 不同：保留正常的 AppX 激活链路，
   // 同时 ActivateApplication 的 arguments 参数允许传入 Chromium 调试端口。
   const aumid = `${family}!${appId}`;
-  const args = `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port}`;
+  const args = `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port} --remote-allow-origins=http://127.0.0.1:${port}`;
   const script = `
 Add-Type -TypeDefinition @"
 using System;
@@ -140,7 +200,7 @@ public static class ChatGPTUsageActivation {
   public static uint Activate(string appUserModelId, string arguments) {
     var manager = (IApplicationActivationManager)new ApplicationActivationManager();
     uint pid;
-    int hr = manager.ActivateApplication(appUserModelId, arguments, 0, out pid);
+    int hr = manager.ActivateApplication(appUserModelId, arguments, 2, out pid);
     if (hr < 0) Marshal.ThrowExceptionForHR(hr);
     return pid;
   }
@@ -168,6 +228,7 @@ export async function launchWithPort(app, port, timeoutMs = 30000) {
       const child = spawn(app.path, [
         '--remote-debugging-address=127.0.0.1',
         `--remote-debugging-port=${port}`,
+        `--remote-allow-origins=http://127.0.0.1:${port}`,
       ], {
         detached: true,
         stdio: 'ignore',
@@ -179,10 +240,11 @@ export async function launchWithPort(app, port, timeoutMs = 30000) {
     spawnSync('/usr/bin/open', ['-a', app.path, '--args', `--remote-debugging-port=${port}`]);
   }
 
+  const waitMs = process.platform === 'win32' ? Math.max(timeoutMs, 180000) : timeoutMs;
   const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
+  while (Date.now() - t0 < waitMs) {
     if (await isPortOpen(port)) return true;
-    await sleep(500);
+    await sleep(process.platform === 'win32' ? 400 : 500);
   }
   return false;
 }
