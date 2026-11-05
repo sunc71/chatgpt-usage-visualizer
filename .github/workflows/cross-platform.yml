@@ -1,0 +1,31 @@
+name: Cross-platform checks
+
+on:
+  push:
+    branches: [windows-support]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Syntax check
+        shell: bash
+        run: |
+          node --check src/app.js
+          node --check src/appServer.js
+          node --check src/launcher.js
+          node --check src/busy.js
+          node --check src/commands.js
+          node --check bin/chatgpt-usage.js
+      - name: Unit tests
+        run: npm test
