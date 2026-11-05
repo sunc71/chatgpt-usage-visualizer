@@ -84,69 +84,6 @@ class CdpSession {
   }
 }
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function inspectRenderer(session) {
-  return session.evaluate(`(() => {
-    const body = document.body;
-    return {
-      href: location.href,
-      nodes: document.querySelectorAll('*').length,
-      textLength: (body?.innerText || '').trim().length,
-      interactive: document.querySelectorAll('button,input,textarea,[contenteditable="true"],a[href]').length,
-      spinnerCount: document.querySelectorAll('.animate-spin,[role="progressbar"]').length,
-      readyState: document.readyState,
-    };
-  })()`);
-}
-
-// Windows 桌面端在某些版本冷启动时会错过初始化事件，表现为空白页/永久 spinner。
-// 只有主页面明显未初始化时才 reload 一次；正常 UI 不做任何改动。
-export async function ensureMainUiReady(port, filter, {
-  settleMs = 12000,
-  minNodes = 250,
-  maxWaitMs = 30000,
-} = {}) {
-  await delay(settleMs);
-  let targets;
-  try {
-    targets = pickMainTargets(await listTargets(port), filter);
-  } catch (e) {
-    return { ready: false, reloaded: false, reason: `target discovery failed: ${e.message}` };
-  }
-  const target = targets[0];
-  if (!target) return { ready: false, reloaded: false, reason: 'main target not found' };
-
-  let session;
-  try {
-    session = await CdpSession.connect(target.webSocketDebuggerUrl);
-    await session.send('Runtime.enable');
-    await session.send('Page.enable');
-    let state = await inspectRenderer(session);
-    const healthy = state && String(state.href || '').startsWith('app://') && state.nodes >= minNodes && (state.interactive > 0 || state.textLength >= 80);
-    if (healthy) return { ready: true, reloaded: false, state };
-
-    await session.send('Page.reload', { ignoreCache: true });
-    const started = Date.now();
-    while (Date.now() - started < maxWaitMs) {
-      await delay(1000);
-      try {
-        state = await inspectRenderer(session);
-        if (state && String(state.href || '').startsWith('app://') && state.nodes >= minNodes && (state.interactive > 0 || state.textLength >= 80)) {
-          return { ready: true, reloaded: true, state };
-        }
-      } catch {
-        // reload 期间 renderer 可能短暂断开，下一轮继续
-      }
-    }
-    return { ready: false, reloaded: true, state, reason: 'main UI still not ready after reload' };
-  } catch (e) {
-    return { ready: false, reloaded: false, reason: e.message };
-  } finally {
-    session?.close();
-  }
-}
-
 // 管理所有主窗口：注入组件脚本、推送数据、窗口重载后自动补注入
 export class Injector {
   constructor({ port, filter, widgetSource, getPayload, log, onRefresh }) {
@@ -172,21 +109,29 @@ export class Injector {
         const s = await CdpSession.connect(t.webSocketDebuggerUrl);
         this.sessions.set(t.id, s);
         s.on('close', () => this.sessions.delete(t.id));
-        s.on('Page.loadEventFired', () => this.#pushTo(s).catch(() => {}));
+        s.on('Page.loadEventFired', () => this.#installInto(s).catch(() => {}));
         // 组件里的"刷新"按钮通过这个绑定通知本程序
         s.on('Runtime.bindingCalled', (p) => { if (p.name === '__codexUsageRefresh') this.onRefresh(); });
         await s.send('Runtime.enable');
         await s.send('Runtime.addBinding', { name: '__codexUsageRefresh' });
         await s.send('Page.enable');
-        await s.send('Page.addScriptToEvaluateOnNewDocument', { source: this.widgetSource });
-        await s.evaluate(this.widgetSource);
-        await this.#pushTo(s);
+        // macOS 保留原版的 document-start 注入行为。
+        // Windows 等官方 renderer 正常完成初始化后再 Runtime.evaluate，避免干扰启动期 UI。
+        if (process.platform !== 'win32') {
+          await s.send('Page.addScriptToEvaluateOnNewDocument', { source: this.widgetSource });
+        }
+        await this.#installInto(s);
         this.log(`已注入窗口：${t.title || t.url}`);
       } catch (e) {
         this.log(`注入失败（${t.title || t.id}）：${e.message}`);
       }
     }
     return this.sessions.size;
+  }
+
+  async #installInto(s) {
+    await s.evaluate(this.widgetSource);
+    await this.#pushTo(s);
   }
 
   async #pushTo(s) {
