@@ -58,43 +58,57 @@ function windowsCandidates(name) {
 
 function findPackagedWindowsApp(names) {
   const wanted = new Set(names.map((n) => normalizeName(n).toLowerCase()));
-  const script = [
-    '$items = Get-AppxPackage -ErrorAction SilentlyContinue |',
-    "Where-Object { $_.Name -like 'OpenAI.*' -and $_.Status -eq 'Ok' } |",
-    'ForEach-Object { [pscustomobject]@{ Name=$_.Name; PackageFamilyName=$_.PackageFamilyName; InstallLocation=$_.InstallLocation; Version=$_.Version.ToString() } }',
-    '$items | ConvertTo-Json -Compress',
-  ].join(' ');
+  const script = `
+$items = Get-AppxPackage -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -like 'OpenAI.*' -and $_.Status -eq 'Ok' }
+$out = foreach ($pkg in $items) {
+  try {
+    $manifest = Get-AppxPackageManifest -Package $pkg
+    $apps = @($manifest.Package.Applications.Application)
+    $app = $apps | Where-Object { [string]$_.Executable -match '(?i)(ChatGPT|Codex)\\.exe$' } | Select-Object -First 1
+    if (-not $app) { $app = $apps | Select-Object -First 1 }
+    if ($app) {
+      $exe = Join-Path $pkg.InstallLocation ([string]$app.Executable)
+      [pscustomobject]@{
+        Name = $pkg.Name
+        PackageFamilyName = $pkg.PackageFamilyName
+        InstallLocation = $pkg.InstallLocation
+        Version = $pkg.Version.ToString()
+        AppId = [string]$app.Id
+        Executable = $exe
+      }
+    }
+  } catch {}
+}
+$out | ConvertTo-Json -Compress
+`;
   try {
     const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
       encoding: 'utf8',
       windowsHide: true,
-      timeout: 8000,
+      timeout: 10000,
       maxBuffer: 4 * 1024 * 1024,
     }).trim();
     if (!out) return null;
     const parsed = JSON.parse(out);
     const pkgs = Array.isArray(parsed) ? parsed : [parsed];
     for (const pkg of pkgs) {
-      const candidates = [
-        ['ChatGPT', path.join(pkg.InstallLocation, 'app', 'ChatGPT.exe')],
-        ['Codex', path.join(pkg.InstallLocation, 'app', 'Codex.exe')],
-      ];
-      for (const [name, exe] of candidates) {
-        if (!wanted.has(name.toLowerCase()) && wanted.size) continue;
-        try {
-          if (fs.existsSync(exe) && fs.statSync(exe).isFile()) {
-            return {
-              name,
-              path: exe,
-              packaged: true,
-              packageFamilyName: pkg.PackageFamilyName,
-              packageName: pkg.Name,
-              packageVersion: pkg.Version,
-              appId: 'App',
-            };
-          }
-        } catch {}
-      }
+      const exe = String(pkg.Executable || '');
+      const base = normalizeName(path.basename(exe));
+      if (wanted.size && !wanted.has(base.toLowerCase())) continue;
+      try {
+        if (exe && fs.existsSync(exe) && fs.statSync(exe).isFile()) {
+          return {
+            name: base || 'ChatGPT',
+            path: exe,
+            packaged: true,
+            packageFamilyName: pkg.PackageFamilyName,
+            packageName: pkg.Name,
+            packageVersion: pkg.Version,
+            appId: pkg.AppId,
+          };
+        }
+      } catch {}
     }
   } catch {}
   return null;
