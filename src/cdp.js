@@ -90,9 +90,11 @@ async function inspectRenderer(session) {
   return session.evaluate(`(() => {
     const body = document.body;
     return {
+      href: location.href,
       nodes: document.querySelectorAll('*').length,
       textLength: (body?.innerText || '').trim().length,
       interactive: document.querySelectorAll('button,input,textarea,[contenteditable="true"],a[href]').length,
+      spinnerCount: document.querySelectorAll('.animate-spin,[role="progressbar"]').length,
       readyState: document.readyState,
     };
   })()`);
@@ -101,9 +103,9 @@ async function inspectRenderer(session) {
 // Windows 桌面端在某些版本冷启动时会错过初始化事件，表现为空白页/永久 spinner。
 // 只有主页面明显未初始化时才 reload 一次；正常 UI 不做任何改动。
 export async function ensureMainUiReady(port, filter, {
-  settleMs = 8000,
+  settleMs = 12000,
   minNodes = 250,
-  maxWaitMs = 18000,
+  maxWaitMs = 30000,
 } = {}) {
   await delay(settleMs);
   let targets;
@@ -121,7 +123,7 @@ export async function ensureMainUiReady(port, filter, {
     await session.send('Runtime.enable');
     await session.send('Page.enable');
     let state = await inspectRenderer(session);
-    const healthy = state && state.nodes >= minNodes && (state.interactive > 0 || state.textLength >= 80);
+    const healthy = state && String(state.href || '').startsWith('app://') && state.nodes >= minNodes && (state.interactive > 0 || state.textLength >= 80);
     if (healthy) return { ready: true, reloaded: false, state };
 
     await session.send('Page.reload', { ignoreCache: true });
@@ -130,7 +132,7 @@ export async function ensureMainUiReady(port, filter, {
       await delay(1000);
       try {
         state = await inspectRenderer(session);
-        if (state && state.nodes >= minNodes && (state.interactive > 0 || state.textLength >= 80)) {
+        if (state && String(state.href || '').startsWith('app://') && state.nodes >= minNodes && (state.interactive > 0 || state.textLength >= 80)) {
           return { ready: true, reloaded: true, state };
         }
       } catch {
