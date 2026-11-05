@@ -10,7 +10,7 @@ import { USER_CONFIG_PATH } from './config.js';
 import { findApp, isRunning } from './app.js';
 import { findCodexBin } from './appServer.js';
 import { UsageSync } from './sync.js';
-import { Injector, isPortOpen, listTargets, pickMainTargets } from './cdp.js';
+import { Injector, isPortOpen, listTargets, pickMainTargets, ensureMainUiReady } from './cdp.js';
 import { launchWithPort, quitApp, installLauncherApp, uninstallLauncherApp, findInstalledLaunchers, LAUNCHER_LOG, dockInstall, dockRestore, relaunchLater } from './launcher.js';
 import { codexBusy, askDialog, notify } from './busy.js';
 
@@ -103,7 +103,16 @@ async function ensureDebugApp(cfg, { withApp = false } = {}) {
 
   log(`正在以调试模式启动 ${app.name}…`);
   if (!(await launchWithPort(app, cfg.debugPort))) {
-    throw new Error(`调试端口 ${cfg.debugPort} 没有打开。这个版本的桌面端可能禁用了 --remote-debugging-port，或 Windows Store 版本不允许直接以参数启动。`);
+    throw new Error(`调试端口 ${cfg.debugPort} 没有打开。这个版本的桌面端可能禁用了 --remote-debugging-port。`);
+  }
+
+  if (process.platform === 'win32') {
+    const ui = await ensureMainUiReady(cfg.debugPort, cfg.targetFilter);
+    if (ui.reloaded && ui.ready) {
+      log('检测到 Windows 主界面未正常初始化，已仅重载主页面一次并恢复。');
+    } else if (!ui.ready && ui.reason) {
+      log(`Windows 主界面健康检查未确认就绪：${ui.reason}`);
+    }
   }
   return app;
 }
