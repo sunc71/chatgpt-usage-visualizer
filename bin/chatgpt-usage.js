@@ -17,23 +17,39 @@ function describe(snap) {
 async function install() {
   const cfg = buildConfig();
   const app = findApp(cfg.appNames);
-  if (!app) throw new Error(`找不到 Codex 应用（尝试过：${cfg.appNames.join('、')}），可用 --app 指定。`);
-  if (cleanupLegacyMenubar()) console.log('✓ 已移除旧版本的菜单栏程序');
+  if (!app) {
+    const hint = process.platform === 'win32'
+      ? '可用 --app "C:\\完整路径\\ChatGPT.exe" 指定。'
+      : '可用 --app 指定。';
+    throw new Error(`找不到 Codex/ChatGPT 应用（尝试过：${cfg.appNames.join('、')}），${hint}`);
+  }
+
+  if (process.platform === 'darwin' && cleanupLegacyMenubar()) console.log('✓ 已移除旧版本的菜单栏程序');
+
   const sb = await sidebar();
   const reveal = await sb.installSidebar(sb.sidebarConfig(), app);
   console.log(`NEEDS_RELAUNCH=${flag('relaunch') ? 'no' : 'yes'}`);
   console.log('INSTALL_RESULT=ok');
+
   if (reveal && !flag('no-reveal')) {
     const { spawnSync } = await import('node:child_process');
-    spawnSync('/usr/bin/open', ['-R', reveal]);
+    if (process.platform === 'win32') {
+      spawnSync('explorer.exe', ['/select,', reveal], { windowsHide: true });
+    } else {
+      spawnSync('/usr/bin/open', ['-R', reveal]);
+    }
   }
 }
 
 async function uninstall() {
   const cfg = buildConfig();
   const sb = await sidebar();
-  if (sb.removeSidebar(cfg)) console.log('✓ 已删除启动器并还原程序坞');
-  if (cleanupLegacyMenubar()) console.log('✓ 已移除旧版本的菜单栏程序');
+  if (sb.removeSidebar(cfg)) {
+    console.log(process.platform === 'win32'
+      ? '✓ 已删除 Windows 启动器和开始菜单快捷方式'
+      : '✓ 已删除启动器并还原程序坞');
+  }
+  if (process.platform === 'darwin' && cleanupLegacyMenubar()) console.log('✓ 已移除旧版本的菜单栏程序');
   console.log('UNINSTALL_RESULT=ok');
 }
 
@@ -41,12 +57,20 @@ async function doctor() {
   const cfg = buildConfig();
   const ok = (b, m) => console.log(`${b ? '✓' : '✗'} ${m}`);
   const major = Number(process.versions.node.split('.')[0]);
+
   ok(major >= 22, `Node.js ${process.versions.node}（需要 22 或更高）`);
-  ok(process.platform === 'darwin', `系统：${process.platform}（目前仅支持 macOS）`);
+  const supported = process.platform === 'darwin' || process.platform === 'win32';
+  ok(supported, `系统：${process.platform}（支持 macOS / Windows）`);
+
   const app = findApp(cfg.appNames);
-  ok(!!app, app ? `应用：${app.path}` : `找不到应用（尝试过：${cfg.appNames.join('、')}）。--app 填桌面端应用的名字，可用 ls /Applications 查看`);
+  const appHint = process.platform === 'win32'
+    ? '--app 可直接填写 ChatGPT.exe / Codex.exe 的完整路径'
+    : '--app 填桌面端应用名，可用 ls /Applications 查看';
+  ok(!!app, app ? `应用：${app.path}` : `找不到应用（尝试过：${cfg.appNames.join('、')}）。${appHint}`);
+
   const bin = findCodexBin(cfg, app && app.path);
   ok(!!bin, bin ? `codex 可执行文件：${bin}` : '找不到 codex 可执行文件（将退回使用会话记录）');
+
   if (bin) {
     const c = new AppServerClient(bin, { debug: flag('debug') });
     try {
@@ -58,6 +82,7 @@ async function doctor() {
       c.stop();
     }
   }
+
   const fb = readLatestFromSessions(cfg.sessionsDir);
   ok(!!fb, fb ? `会话记录备用数据：${describe(fb.snapshot)}` : `会话记录中没有找到额度数据（${cfg.sessionsDir}）`);
   await (await sidebar()).doctorSidebar(ok);
@@ -65,23 +90,25 @@ async function doctor() {
 }
 
 async function help() {
-  console.log(`chatgpt-usage —— 在 Codex 侧栏显示额度与重置倒计时（非官方工具）
+  console.log(`chatgpt-usage —— 在 Codex / ChatGPT 桌面端侧栏显示额度与重置倒计时（非官方工具）
 
 用法：
-  chatgpt-usage install    创建启动器（与原应用同名）：和 Codex 一起启动、一起退出
-                             --dock 替换程序坞原图标  --relaunch 15 秒后重启 Codex
-                             --launcher-name 启动器名称  --no-reveal 不在访达中显示
-  chatgpt-usage uninstall  删除启动器，还原程序坞
+  chatgpt-usage install    创建启动器
+                           macOS：可用 --dock 替换程序坞图标
+                           Windows：自动创建开始菜单 Usage 快捷方式
+                           --relaunch 15 秒后通过启动器重启桌面端
+  chatgpt-usage uninstall  删除启动器（macOS 同时还原程序坞）
   chatgpt-usage doctor     检查运行环境与数据源
   chatgpt-usage start      手动运行组件（终端前台）
-  chatgpt-usage relaunch   15 秒后通过启动器重启 Codex（--delay 秒数）
+  chatgpt-usage relaunch   15 秒后通过启动器重新打开桌面端（--delay 秒数）
 
 选项：
-  --app <名称>          指定应用名，例如 --app Codex
-  --port <端口>         调试端口，默认 9222
-  --codex-bin <路径>    指定 codex 可执行文件
-  --yes                 需要重启 Codex 时不再询问
-  --debug               输出详细日志`);
+  --app <名称或路径>      macOS 可填 Codex；Windows 建议填 exe 完整路径
+  --launcher-name <名称>  自定义启动器名称
+  --port <端口>           调试端口，默认 9222
+  --codex-bin <路径>      指定 codex / codex.exe
+  --yes                   需要重启桌面端时不再询问
+  --debug                 输出详细日志`);
 }
 
 const commands = {
