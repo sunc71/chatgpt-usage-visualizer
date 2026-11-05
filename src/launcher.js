@@ -87,10 +87,29 @@ export async function quitApp(app, timeoutMs = 20000) {
   return false;
 }
 
+function resolveWindowsPackageIdentity(exePath) {
+  const script = [
+    `$target=[IO.Path]::GetFullPath(${psQuote(exePath)})`,
+    '$pkg = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object {',
+    '  $_.InstallLocation -and $target.StartsWith([IO.Path]::GetFullPath($_.InstallLocation), [StringComparison]::OrdinalIgnoreCase)',
+    '} | Select-Object -First 1',
+    "if ($pkg) { [pscustomobject]@{ PackageFamilyName=$pkg.PackageFamilyName; Name=$pkg.Name; Version=$pkg.Version.ToString() } | ConvertTo-Json -Compress }",
+  ].join(' ');
+  try {
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8', windowsHide: true, timeout: 8000,
+    }).trim();
+    return out ? JSON.parse(out) : null;
+  } catch {
+    return null;
+  }
+}
+
 function launchPackagedWindowsApp(app, port) {
-  const family = app.packageFamilyName;
+  const identity = app.packageFamilyName ? app : resolveWindowsPackageIdentity(app.path);
+  const family = identity?.packageFamilyName || identity?.PackageFamilyName;
   const appId = app.appId || 'App';
-  if (!family) throw new Error('缺少 Windows package family，拒绝直接启动 MSIX 可执行文件');
+  if (!family) throw new Error('无法确认 Windows package identity，已停止启动以避免破坏原客户端 UI');
 
   const args = `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port}`;
   const script = [
