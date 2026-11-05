@@ -15,14 +15,26 @@ export async function isPortOpen(port) {
   }
 }
 
+function isWindowsMainRenderer(urlText) {
+  try {
+    const url = new URL(String(urlText || ''));
+    if (url.protocol !== 'app:' || url.hostname !== '-' || url.pathname !== '/index.html') return false;
+    const initialRoute = url.searchParams.get('initialRoute');
+    if (initialRoute === null) return true;
+    // Windows 的独立 Codex 任务窗口也是正常 renderer；avatar overlay / detached shell 等仍排除。
+    return /^\\/local\\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\/?$/i.test(initialRoute);
+  } catch {
+    return false;
+  }
+}
+
 export function pickMainTargets(targets, filter) {
-  return targets.filter(
-    (t) =>
-      t.type === 'page' &&
-      t.webSocketDebuggerUrl &&
-      String(t.url).startsWith(filter.urlPrefix) &&
-      !filter.excludeUrlIncludes.some((s) => String(t.url).includes(s)),
-  );
+  return targets.filter((t) => {
+    if (t.type !== 'page' || !t.webSocketDebuggerUrl) return false;
+    if (process.platform === 'win32') return isWindowsMainRenderer(t.url);
+    return String(t.url).startsWith(filter.urlPrefix)
+      && !filter.excludeUrlIncludes.some((s) => String(t.url).includes(s));
+  });
 }
 
 class CdpSession {
