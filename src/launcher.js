@@ -87,14 +87,44 @@ export async function quitApp(app, timeoutMs = 20000) {
   return false;
 }
 
+function launchPackagedWindowsApp(app, port) {
+  const family = app.packageFamilyName;
+  const appId = app.appId || 'App';
+  if (!family) throw new Error('缺少 Windows package family，拒绝直接启动 MSIX 可执行文件');
+
+  const args = `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port}`;
+  const script = [
+    '$cmd = Get-Command Invoke-CommandInDesktopPackage -ErrorAction SilentlyContinue',
+    "if (-not $cmd) { Write-Error 'Invoke-CommandInDesktopPackage unavailable'; exit 2 }",
+    `Invoke-CommandInDesktopPackage -PackageFamilyName ${psQuote(family)} -AppId ${psQuote(appId)} -Command ${psQuote(app.path)} -Args ${psQuote(args)}`,
+  ].join('; ');
+
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 12000,
+  });
+  if (r.status !== 0) {
+    const detail = String(r.stderr || r.stdout || '').trim();
+    throw new Error(`无法以 Windows 包身份启动桌面端${detail ? `：${detail}` : ''}`);
+  }
+}
+
 export async function launchWithPort(app, port, timeoutMs = 30000) {
   if (process.platform === 'win32') {
-    const child = spawn(app.path, [`--remote-debugging-port=${port}`], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: false,
-    });
-    child.unref();
+    if (app.packaged || app.packageFamilyName || /[\\/]WindowsApps[\\/]/i.test(app.path)) {
+      launchPackagedWindowsApp(app, port);
+    } else {
+      const child = spawn(app.path, [
+        '--remote-debugging-address=127.0.0.1',
+        `--remote-debugging-port=${port}`,
+      ], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false,
+      });
+      child.unref();
+    }
   } else {
     spawnSync('/usr/bin/open', ['-a', app.path, '--args', `--remote-debugging-port=${port}`]);
   }
