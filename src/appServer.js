@@ -166,6 +166,19 @@ export class AppServerClient extends EventEmitter {
   }
 
   stop() {
-    if (this.proc) this.proc.kill();
+    if (!this.proc) return;
+    const proc = this.proc;
+    this.proc = null;
+    if (process.platform === 'win32' && proc.pid) {
+      try {
+        execFileSync('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], {
+          stdio: 'ignore',
+          windowsHide: true,
+          timeout: 5000,
+        });
+        return;
+      } catch {}
+    }
+    try { proc.kill(); } catch {}
   }
 }
