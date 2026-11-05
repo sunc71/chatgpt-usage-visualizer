@@ -11,10 +11,28 @@
 
 > 非官方工具，与 OpenAI 无关。工具通过本机 Chromium DevTools 调试端口向桌面端页面注入组件。客户端更新后，组件选择器可能需要适配。
 
+> **Windows 用户注意**：本分支不会直接执行 `C:\\Program Files\\WindowsApps\\...\\ChatGPT.exe`。Microsoft Store/MSIX 版会通过 Windows 的 AppX 激活接口启动，以保留原客户端的 package identity 和正常 UI。若你安装过 2026-11-05 早期的 Windows 版本，请先执行下面的“更新旧版安装”步骤。
+
 <p align="center">
   <img src="docs/preview-light.png" width="360">
   <img src="docs/preview-dark.png" width="360">
 </p>
+
+---
+
+## 更新旧版 Windows 安装
+
+如果你之前安装过本 fork 的早期 Windows 版本，并出现 **原 UI 空白、一直 loading、发送按钮不可用或原界面无法正常使用**，先完全退出 ChatGPT/Codex，然后在仓库目录执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
+git pull
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+旧版创建的 `(Usage)` 快捷方式会被删除并重新创建。
+
+如果只是想立即恢复官方客户端，不需要卸载官方 ChatGPT/Codex：**直接从 Windows 原来的开始菜单 ChatGPT/Codex 图标启动即可**。本工具不会修改官方安装包。
 
 ---
 
@@ -209,6 +227,12 @@ node .\bin\chatgpt-usage.js doctor
 ```powershell
 Get-Content "$env:LOCALAPPDATA\ChatGPT Usage Visualizer\chatgpt-usage-visualizer.log" -Tail 100
 ```
+
+### 原 UI 空白 / 一直 loading
+
+新版启动器会先等待官方主界面完成初始化。只有检测到 `app://-/index.html` 明显处于空白/未初始化状态时，才会对主页面执行一次延迟 reload；正常 UI 不会 reload。Windows Codex 已有公开报告表明，部分版本冷启动会卡在空白或 spinner，而对主 renderer 做一次外部 CDP reload 可以恢复完整原 UI。
+
+如果仍然异常，先运行卸载脚本，再从 Windows 原始开始菜单图标启动官方客户端。
 
 ### 调试端口 9222 没有打开
 
