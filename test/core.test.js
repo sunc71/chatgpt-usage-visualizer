@@ -99,14 +99,19 @@ test('app-server 临时失败时保留较新的数据，并尽快重试', async 
   }
 });
 
-test('只选择主窗口', () => {
+test('只选择主窗口；Windows 允许真实 local task renderer', () => {
   const t = (url, type = 'page') => ({ id: url, url, type, webSocketDebuggerUrl: 'ws://x' });
+  const localTask = t('app://-/index.html?initialRoute=%2Flocal%2F019fb3b1-2638-7bb0-9a90-ec83b5bca0f2');
   const picked = pickMainTargets([
-    t('app://-/index.html'), t('app://-/index.html?initialRoute=%2Favatar-overlay'),
-    t('app://-/detached-window.html?initialRoute=%2Fdetached-window'), t('https://chatgpt.com/'),
+    t('app://-/index.html'),
+    localTask,
+    t('app://-/index.html?initialRoute=%2Favatar-overlay'),
+    t('app://-/detached-window.html?initialRoute=%2Fdetached-window'),
+    t('https://chatgpt.com/'),
     t('app://-/index.html', 'iframe'),
   ], { urlPrefix: 'app://-/index.html', excludeUrlIncludes: ['initialRoute='] });
-  assert.equal(picked.length, 1);
+  assert.equal(picked.length, process.platform === 'win32' ? 2 : 1);
+  if (process.platform === 'win32') assert.ok(picked.includes(localTask));
 });
 
 test('识别 Codex 正在运行的命令，排除常驻 MCP 服务和应用自身进程', () => {
