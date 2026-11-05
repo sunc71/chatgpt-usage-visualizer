@@ -1,5 +1,8 @@
 # ChatGPT Usage Visualizer
 
+> **Windows 版设计目标：保持原 macOS 版的形态。** Windows 不另做托盘、悬浮窗或独立 Dashboard；仍然使用原项目的 `src/widget.js`，把 5 小时 / 每周额度组件直接挂在 Codex 左侧栏“用量 / Usage”入口附近。Windows 只替换底层的 MSIX 启动、CDP 端口发现和 renderer 注入生命周期。
+
+
 在 **ChatGPT / Codex 桌面端侧边栏**显示额度信息，包括：
 
 - 5 小时额度剩余比例
@@ -230,9 +233,9 @@ Get-Content "$env:LOCALAPPDATA\ChatGPT Usage Visualizer\chatgpt-usage-visualizer
 
 ### 原 UI 空白 / 一直 loading
 
-新版启动器会先等待官方主界面完成初始化。只有检测到 `app://-/index.html` 明显处于空白/未初始化状态时，才会对主页面执行一次延迟 reload；正常 UI 不会 reload。Windows Codex 已有公开报告表明，部分版本冷启动会卡在空白或 spinner，而对主 renderer 做一次外部 CDP reload 可以恢复完整原 UI。
+当前版本 **不会对官方 renderer 执行 `Page.reload`**，也不会在 Windows 上自动强制结束已运行的 Codex。启动器会等待官方 MSIX/桌面客户端自行完成初始化，最长等待 180 秒；只有发现真实 `app://-/index.html` renderer 后才注入组件。
 
-如果仍然异常，先运行卸载脚本，再从 Windows 原始开始菜单图标启动官方客户端。
+如果官方客户端已经在普通模式运行但没有 CDP，工具会停止并提示你正常退出后重新从 Usage 启动器打开，不会替你强杀进程。
 
 ### 调试端口 9222 没有打开
 
@@ -307,6 +310,19 @@ node .\bin\chatgpt-usage.js uninstall
 --yes
 --debug
 ```
+
+---
+
+## Windows 实现参考
+
+Windows 适配重点参考以下公开项目的成熟启动与 CDP 生命周期设计：
+
+- `JiaYang-BUAA/Codex-Desktop-Usage-Monitor-Windows`：MSIX 激活、动态 CDP 端口、最长 180 秒等待 renderer、Windows Codex 注入生命周期（MIT）。
+- `Hung2124/codex-multi-profile`：通过 `IApplicationActivationManager` 启动 Microsoft Store Codex，并明确避免直接执行 WindowsApps 内的 exe（MIT）。
+- `soulvon/AnyBridge`：Windows Codex package identity / CDP 启动实践（MIT）。
+- `DrFanghaiz/codex-usage-card`：参考新版 Codex 左侧栏原生“用量”入口的 DOM / 几何兼容思路；本项目不直接复制其未声明许可的源码。
+
+本 fork 保留原 macOS 组件的视觉和交互代码；参考项目主要用于 Windows 启动、renderer 识别和生命周期设计。
 
 ---
 
