@@ -77,9 +77,11 @@ function pathStartsWith(candidate, root) {
 
 export function runningCommands(appPath, procs = listProcesses(), graceSec = 120) {
   if (!procs) return null;
-  const appRoot = process.platform === 'win32' ? path.dirname(appPath) : appPath;
+  // 依据传入路径本身判断风格，便于跨平台测试，也支持显式传入另一平台的样例路径。
+  const windowsStyle = /^[A-Za-z]:[\\/]/.test(appPath) || /\.exe$/i.test(appPath);
+  const appRoot = windowsStyle ? path.dirname(appPath) : appPath;
   const inApp = (p) => {
-    if (process.platform === 'win32') {
+    if (windowsStyle) {
       return pathStartsWith(p.exe, appRoot)
         || (p.command && p.command.toLowerCase().includes(appRoot.toLowerCase()));
     }
