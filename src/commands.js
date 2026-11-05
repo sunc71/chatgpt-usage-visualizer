@@ -10,8 +10,8 @@ import { USER_CONFIG_PATH } from './config.js';
 import { findApp, isRunning } from './app.js';
 import { findCodexBin } from './appServer.js';
 import { UsageSync } from './sync.js';
-import { Injector, isPortOpen, listTargets, pickMainTargets, ensureMainUiReady } from './cdp.js';
-import { launchWithPort, quitApp, installLauncherApp, uninstallLauncherApp, findInstalledLaunchers, LAUNCHER_LOG, dockInstall, dockRestore, relaunchLater } from './launcher.js';
+import { Injector, isPortOpen, listTargets, pickMainTargets } from './cdp.js';
+import { launchWithPort, quitApp, installLauncherApp, uninstallLauncherApp, findInstalledLaunchers, LAUNCHER_LOG, dockInstall, dockRestore, relaunchLater, resolveWindowsDebugPort, findRunningWindowsDebugPort } from './launcher.js';
 import { codexBusy, askDialog, notify } from './busy.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -60,14 +60,42 @@ const CANCELLED = Symbol('cancelled');
 
 async function ensureDebugApp(cfg, { withApp = false } = {}) {
   const app = findApp(cfg.appNames);
-  if (await isPortOpen(cfg.debugPort)) return app;
-  if (!app) {
-    const hint = process.platform === 'win32'
-      ? '可用 --app "C:\\完整路径\\ChatGPT.exe" 指定。'
-      : '可用 --app "应用名" 指定。';
-    throw new Error(`找不到 Codex/ChatGPT 应用（尝试过：${cfg.appNames.join('、')}）。${hint}`);
+
+  if (process.platform === 'win32') {
+    // 如果已经是由 Usage 启动器打开的实例，复用它实际使用的端口。
+    const runningPort = findRunningWindowsDebugPort();
+    if (runningPort && await isPortOpen(runningPort)) {
+      cfg.debugPort = runningPort;
+      return app;
+    }
+    if (await isPortOpen(cfg.debugPort)) return app;
+
+    if (!app) {
+      throw new Error(`找不到 Codex/ChatGPT Windows 桌面端（尝试过：${cfg.appNames.join('、')}）。可用 --app "C:\\完整路径\\ChatGPT.exe" 指定。`);
+    }
+
+    // Windows 上绝不自动结束/重启用户已经打开的官方客户端。
+    // 已运行但没有 CDP 时，让用户正常退出，再从 Usage 启动器启动。
+    if (isRunning(app.path)) {
+      throw new Error(
+        `${app.name} 已经在运行，但没有开放本机 CDP。请先在官方界面中正常退出 ${app.name}，确认窗口和后台进程结束后，再从 Usage 快捷方式启动；本工具不会强制结束现有会话。`
+      );
+    }
+
+    cfg.debugPort = await resolveWindowsDebugPort(cfg.debugPort);
+    log(`正在通过 Windows AppX/桌面启动链路打开 ${app.name}（CDP 127.0.0.1:${cfg.debugPort}）…`);
+    if (!(await launchWithPort(app, cfg.debugPort, 180000))) {
+      throw new Error(`调试端口 ${cfg.debugPort} 在 180 秒内没有出现。已停止组件启动，不会 reload 或修改官方 UI。`);
+    }
+    return app;
   }
 
+  if (await isPortOpen(cfg.debugPort)) return app;
+  if (!app) {
+    throw new Error(`找不到 Codex/ChatGPT 应用（尝试过：${cfg.appNames.join('、')}）。可用 --app "应用名" 指定。`);
+  }
+
+  // macOS 保留原项目的启动/重启交互。
   if (isRunning(app.path)) {
     const b = codexBusy(app, cfg);
     if (withApp) {
@@ -103,16 +131,7 @@ async function ensureDebugApp(cfg, { withApp = false } = {}) {
 
   log(`正在以调试模式启动 ${app.name}…`);
   if (!(await launchWithPort(app, cfg.debugPort))) {
-    throw new Error(`调试端口 ${cfg.debugPort} 没有打开。这个版本的桌面端可能禁用了 --remote-debugging-port。`);
-  }
-
-  if (process.platform === 'win32') {
-    const ui = await ensureMainUiReady(cfg.debugPort, cfg.targetFilter);
-    if (ui.reloaded && ui.ready) {
-      log('检测到 Windows 主界面未正常初始化，已仅重载主页面一次并恢复。');
-    } else if (!ui.ready && ui.reason) {
-      log(`Windows 主界面健康检查未确认就绪：${ui.reason}`);
-    }
+    throw new Error(`调试端口 ${cfg.debugPort} 没有打开。`);
   }
   return app;
 }
