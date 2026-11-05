@@ -75,7 +75,7 @@ function pathStartsWith(candidate, root) {
   return a === b || a.startsWith(b + path.sep);
 }
 
-export function runningCommands(appPath, procs = listProcesses()) {
+export function runningCommands(appPath, procs = listProcesses(), graceSec = 120) {
   if (!procs) return null;
   const appRoot = process.platform === 'win32' ? path.dirname(appPath) : appPath;
   const inApp = (p) => {
@@ -107,6 +107,9 @@ export function runningCommands(appPath, procs = listProcesses()) {
       visited.add(p.pid);
       stack.push(...(children.get(p.pid) || []));
       if (inApp(p) || isKnownMcpService(p.command)) continue;
+      // 保留上游行为：随 codex 一起启动的早期常驻子进程不视为用户任务。
+      // 只有明显晚于 codex 根进程启动的未知进程才判定为活动命令。
+      if (root.age != null && p.age != null && root.age - p.age <= graceSec) continue;
       found.push(p);
     }
   }
@@ -135,7 +138,7 @@ export function codexBusy(app, cfg) {
   const b = cfg.busy || {};
   const writeAge = newestSessionWriteAgeSec(cfg.sessionsDir);
   if (writeAge < (b.recentWriteSec ?? 30)) return { busy: true, reason: `${Math.round(writeAge)} 秒前有会话写入` };
-  const cmds = runningCommands(app.path);
+  const cmds = runningCommands(app.path, listProcesses(), b.commandGraceSec ?? 120);
   if (!cmds) return { busy: true, reason: '无法确认进程状态，请手动确认任务已结束' };
   if (cmds.length) return { busy: true, reason: `正在运行命令：${cmds[0].command.slice(0, 60)}` };
   return { busy: false, reason: '' };
