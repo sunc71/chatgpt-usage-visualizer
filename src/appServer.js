@@ -87,7 +87,12 @@ export class AppServerClient extends EventEmitter {
   }
 
   async start() {
-    this.proc = spawn(this.bin, ['app-server'], {
+    // Windows 不能像 Unix 一样依赖 shebang 直接执行 .js 测试桩/脚本。
+    // 真正的 codex.exe 仍然直接执行。
+    const scriptBin = /\.m?js$/i.test(this.bin);
+    const command = scriptBin ? process.execPath : this.bin;
+    const argv = scriptBin ? [this.bin, 'app-server'] : ['app-server'];
+    this.proc = spawn(command, argv, {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
