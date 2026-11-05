@@ -18,13 +18,65 @@ ChatGPT / Codex 桌面端额度可视化工具：在 Codex 左侧栏"用量"按�
 按照仓库里 AGENTS.md 的步骤执行。
 ```
 
-安装完成后 Codex 会自动重启一次，之后照常从程序坞点 Codex 图标打开即可。
+macOS 安装完成后照常从程序坞启动；Windows 安装后从开始菜单中的 `(Usage)` 快捷方式启动。
 
 ## 运行要求
 
-- macOS
+- macOS 或 Windows 10/11
 - Node.js 22 或更高版本（终端运行 `node -v` 查看，没有的话到 [nodejs.org](https://nodejs.org) 安装）
-- Codex 桌面端（ChatGPT.app 或 Codex.app）
+- Codex / ChatGPT 桌面端（macOS: `.app`；Windows: `.exe`）
+
+## Windows 快速开始
+
+Windows 版由本 fork 增加。核心逻辑与 macOS 相同：以 `--remote-debugging-port=9222` 启动桌面端，然后通过 Chromium DevTools Protocol 注入额度组件。
+
+**1. 克隆仓库**
+
+```powershell
+git clone https://github.com/sunc71/chatgpt-usage-visualizer.git
+cd chatgpt-usage-visualizer
+git checkout windows-support
+```
+
+**2. 检查环境**
+
+```powershell
+node .\bin\chatgpt-usage.js doctor
+```
+
+如果自动找不到 ChatGPT/Codex，可以直接传 exe 完整路径：
+
+```powershell
+node .\bin\chatgpt-usage.js doctor --app "C:\Path\To\ChatGPT.exe"
+```
+
+**3. 一键安装**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+如果需要手动指定桌面端：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -App "C:\Path\To\ChatGPT.exe"
+```
+
+安装后会在开始菜单创建 **ChatGPT (Usage)** 或 **Codex (Usage)** 快捷方式。先完全退出原桌面端，再从这个 Usage 快捷方式启动。
+
+Windows 日志默认位于：
+
+```text
+%LOCALAPPDATA%\ChatGPT Usage Visualizer\chatgpt-usage-visualizer.log
+```
+
+卸载：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
+```
+
+> Windows Store / MSIX 版如果不允许直接给应用传 `--remote-debugging-port`，可能无法使用本工具。此时优先使用可直接定位到 `.exe` 的桌面安装版本，并用 `--app` 显式指定路径。
 
 ## 快速开始
 
@@ -58,7 +110,7 @@ node bin/chatgpt-usage.js doctor
 
 ## 使用方式
 
-**不想用启动器的话**，也可以每次手动运行 `node bin/chatgpt-usage.js start`，保持终端窗口开着，按 `Ctrl+C` 停止。
+**不想用启动器的话**，也可以每次手动运行 `node bin/chatgpt-usage.js start`。macOS 和 Windows 都支持；保持终端窗口开着，按 `Ctrl+C` 停止。
 
 ### 启动器的工作方式
 
@@ -74,7 +126,7 @@ node bin/chatgpt-usage.js doctor
 
 组件依赖调试端口，而调试端口只能在 Codex 启动时开启，所以**必须从启动器打开**。启动器与原应用同名同图标，需要留意两点：Codex 运行时，程序坞里会同时出现两个相同的图标，固定的那个是启动器，带运行指示点的是 Codex 本身，这是正常的；用 Spotlight 或启动台搜索时会看到两个同名应用，位于 `~/Applications` 的是启动器，位于 `/Applications` 的是原应用。如果打开的是原应用、通过通知打开，或者 Codex 自动更新后自行重启，组件不会出现，退出 Codex 后再从程序坞打开即可。Codex 设置了开机自动打开的话，请到"系统设置 → 通用 → 登录项"里换成 `~/Applications` 下的启动器。
 
-日志位于 `~/Library/Logs/chatgpt-usage-visualizer.log`。移动了工具文件夹或重装了 Node 后，需要重新运行 `install`；不再需要时运行 `node bin/chatgpt-usage.js uninstall`。
+macOS 日志位于 `~/Library/Logs/chatgpt-usage-visualizer.log`；Windows 日志位于 `%LOCALAPPDATA%\\ChatGPT Usage Visualizer\\chatgpt-usage-visualizer.log`。移动了工具文件夹或重装了 Node 后，需要重新运行 `install`；不再需要时运行 `node bin/chatgpt-usage.js uninstall`。
 
 ## 不同套餐
 
@@ -150,7 +202,7 @@ node bin/chatgpt-usage.js doctor
 
 ```
 node bin/chatgpt-usage.js doctor      检查运行环境、调试端口、数据源
-node bin/chatgpt-usage.js install     创建启动器（--dock 替换程序坞图标，--launcher-name 自定义名称）
+node bin/chatgpt-usage.js install     创建启动器（macOS: --dock；Windows: 自动创建开始菜单快捷方式）
 node bin/chatgpt-usage.js uninstall   删除启动器，还原程序坞
 node bin/chatgpt-usage.js relaunch    15 秒后通过启动器重新打开 Codex
 node bin/chatgpt-usage.js start       手动启动（终端前台运行）
