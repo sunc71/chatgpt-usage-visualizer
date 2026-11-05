@@ -111,12 +111,43 @@ function launchPackagedWindowsApp(app, port) {
   const appId = app.appId || 'App';
   if (!family) throw new Error('无法确认 Windows package identity，已停止启动以避免破坏原客户端 UI');
 
+  // 通过 Windows 官方 IApplicationActivationManager 激活 Store/MSIX 应用。
+  // 这与直接执行 WindowsApps 里的 ChatGPT.exe 不同：保留正常的 AppX 激活链路，
+  // 同时 ActivateApplication 的 arguments 参数允许传入 Chromium 调试端口。
+  const aumid = `${family}!${appId}`;
   const args = `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port}`;
-  const script = [
-    '$cmd = Get-Command Invoke-CommandInDesktopPackage -ErrorAction SilentlyContinue',
-    "if (-not $cmd) { Write-Error 'Invoke-CommandInDesktopPackage unavailable'; exit 2 }",
-    `Invoke-CommandInDesktopPackage -PackageFamilyName ${psQuote(family)} -AppId ${psQuote(appId)} -Command ${psQuote(app.path)} -Args ${psQuote(args)}`,
-  ].join('; ');
+  const script = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class ChatGPTUsageActivation {
+  [ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+  private class ApplicationActivationManager {}
+
+  [ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"),
+   InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  private interface IApplicationActivationManager {
+    int ActivateApplication(
+      [MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
+      [MarshalAs(UnmanagedType.LPWStr)] string arguments,
+      uint options,
+      out uint processId);
+    int ActivateForFile(string appUserModelId, IntPtr itemArray, string verb, out uint processId);
+    int ActivateForProtocol(string appUserModelId, IntPtr itemArray, out uint processId);
+  }
+
+  public static uint Activate(string appUserModelId, string arguments) {
+    var manager = (IApplicationActivationManager)new ApplicationActivationManager();
+    uint pid;
+    int hr = manager.ActivateApplication(appUserModelId, arguments, 0, out pid);
+    if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+    return pid;
+  }
+}
+"@
+[void][ChatGPTUsageActivation]::Activate(${psQuote(aumid)}, ${psQuote(args)})
+`;
 
   const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
     encoding: 'utf8',
@@ -125,7 +156,7 @@ function launchPackagedWindowsApp(app, port) {
   });
   if (r.status !== 0) {
     const detail = String(r.stderr || r.stdout || '').trim();
-    throw new Error(`无法以 Windows 包身份启动桌面端${detail ? `：${detail}` : ''}`);
+    throw new Error(`无法通过 Windows AppX 激活接口启动桌面端${detail ? `：${detail}` : ''}`);
   }
 }
 
