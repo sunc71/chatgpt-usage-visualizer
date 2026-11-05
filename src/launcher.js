@@ -1,6 +1,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { isPortOpen } from './cdp.js';
@@ -9,11 +10,34 @@ import { isRunning, bundleId } from './app.js';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export const LAUNCHER_ID = 'local.chatgpt-usage-visualizer.launcher';
-const LEGACY_LAUNCHER_IDS = ['local.codex-usage-countdown.launcher']; // 旧项目名生成的启动器
-const LAUNCHER_DIR = path.join(os.homedir(), 'Applications');
+const LEGACY_LAUNCHER_IDS = ['local.codex-usage-countdown.launcher'];
 
-// 判断某个 .app 是否是本工具生成的启动器（启动器可能与原应用同名）
+const WIN_HOME = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+const WIN_LAUNCHER_DIR = path.join(WIN_HOME, 'ChatGPT Usage Visualizer');
+const MAC_LAUNCHER_DIR = path.join(os.homedir(), 'Applications');
+const LAUNCHER_DIR = process.platform === 'win32' ? WIN_LAUNCHER_DIR : MAC_LAUNCHER_DIR;
+
+export const LAUNCHER_LOG = process.platform === 'win32'
+  ? path.join(WIN_LAUNCHER_DIR, 'chatgpt-usage-visualizer.log')
+  : path.join(os.homedir(), 'Library', 'Logs', 'chatgpt-usage-visualizer.log');
+
+function safeLauncherName(name) {
+  const s = String(name || '').trim();
+  if (!s || /[\\/\0:*?"<>|]/.test(s) || ['.', '..'].includes(s)) {
+    throw new Error('启动器名称包含 Windows/macOS 不允许的字符');
+  }
+  return s;
+}
+
 export function isOurLauncher(appPath) {
+  if (process.platform === 'win32') {
+    try {
+      const text = fs.readFileSync(appPath, 'utf8');
+      return text.includes('chatgpt-usage-visualizer launcher');
+    } catch {
+      return false;
+    }
+  }
   try {
     const plist = fs.readFileSync(path.join(appPath, 'Contents', 'Info.plist'), 'utf8');
     return [LAUNCHER_ID, ...LEGACY_LAUNCHER_IDS].some((id) => plist.includes(id));
@@ -25,13 +49,37 @@ export function isOurLauncher(appPath) {
 export function findInstalledLaunchers() {
   let entries = [];
   try { entries = fs.readdirSync(LAUNCHER_DIR); } catch { return []; }
-  return entries.filter((e) => e.endsWith('.app')).map((e) => path.join(LAUNCHER_DIR, e)).filter(isOurLauncher);
+  if (process.platform === 'win32') {
+    return entries.filter((e) => e.endsWith('.cmd'))
+      .map((e) => path.join(LAUNCHER_DIR, e))
+      .filter(isOurLauncher);
+  }
+  return entries.filter((e) => e.endsWith('.app'))
+    .map((e) => path.join(LAUNCHER_DIR, e))
+    .filter(isOurLauncher);
+}
+
+function psQuote(s) {
+  return `'${String(s).replace(/'/g, "''")}'`;
 }
 
 export async function quitApp(app, timeoutMs = 20000) {
-  // 按 bundle id 退出，避免同名启动器造成歧义
-  const id = bundleId(app.path);
-  spawnSync('/usr/bin/osascript', ['-e', id ? `quit app id "${id}"` : `quit app "${app.name}"`]);
+  if (process.platform === 'win32') {
+    const script = [
+      `$target=[IO.Path]::GetFullPath(${psQuote(app.path)})`,
+      '$ps=Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |',
+      'Where-Object { $_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath) -ieq $target) }',
+      'foreach($p in $ps){ Stop-Process -Id $p.ProcessId -ErrorAction SilentlyContinue }',
+    ].join(' ');
+    spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+  } else {
+    const id = bundleId(app.path);
+    spawnSync('/usr/bin/osascript', ['-e', id ? `quit app id "${id}"` : `quit app "${app.name}"`]);
+  }
+
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
     if (!isRunning(app.path)) return true;
@@ -40,26 +88,213 @@ export async function quitApp(app, timeoutMs = 20000) {
   return false;
 }
 
+function resolveWindowsPackageIdentity(exePath) {
+  const script = `
+$target=[IO.Path]::GetFullPath(${psQuote(exePath)})
+$pkg = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object {
+  $_.InstallLocation -and $target.StartsWith([IO.Path]::GetFullPath($_.InstallLocation), [StringComparison]::OrdinalIgnoreCase)
+} | Select-Object -First 1
+if ($pkg) {
+  $manifest = Get-AppxPackageManifest -Package $pkg
+  $apps = @($manifest.Package.Applications.Application)
+  $app = $apps | Where-Object {
+    $candidate = Join-Path $pkg.InstallLocation ([string]$_.Executable)
+    [IO.Path]::GetFullPath($candidate).Equals($target, [StringComparison]::OrdinalIgnoreCase)
+  } | Select-Object -First 1
+  if (-not $app) { $app = $apps | Select-Object -First 1 }
+  [pscustomobject]@{
+    PackageFamilyName=$pkg.PackageFamilyName
+    Name=$pkg.Name
+    Version=$pkg.Version.ToString()
+    AppId=[string]$app.Id
+  } | ConvertTo-Json -Compress
+}
+`;
+  try {
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8', windowsHide: true, timeout: 10000,
+    }).trim();
+    return out ? JSON.parse(out) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function findRunningWindowsDebugPort() {
+  if (process.platform !== 'win32') return 0;
+  const script = `
+$ports = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -in @('ChatGPT.exe','Codex.exe') -and $_.CommandLine } |
+  ForEach-Object {
+    foreach ($m in [regex]::Matches([string]$_.CommandLine, '--remote-debugging-port(?:=|\\s+)(\\d+)')) {
+      [int]$m.Groups[1].Value
+    }
+  } | Select-Object -Unique
+$ports -join [Environment]::NewLine
+`;
+  try {
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8', windowsHide: true, timeout: 5000,
+    });
+    return out.split(/\\r?\\n/).map((x) => Number(x.trim())).find((x) => x >= 1024 && x <= 65535) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function canBindLoopback(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.unref();
+    server.once('error', () => resolve(false));
+    server.listen({ host: '127.0.0.1', port, exclusive: true }, () => {
+      server.close(() => resolve(true));
+    });
+  });
+}
+
+export async function resolveWindowsDebugPort(preferred, searchCount = 20) {
+  if (process.platform !== 'win32') return preferred;
+  const running = findRunningWindowsDebugPort();
+  if (running && await isPortOpen(running)) return running;
+  for (let i = 0; i < searchCount; i++) {
+    const candidate = Number(preferred) + i;
+    if (candidate > 65535) break;
+    if (await canBindLoopback(candidate)) return candidate;
+  }
+  throw new Error(`从端口 ${preferred} 开始没有找到可用的本机调试端口`);
+}
+
+function launchPackagedWindowsApp(app, port) {
+  const identity = app.packageFamilyName ? app : resolveWindowsPackageIdentity(app.path);
+  const family = identity?.packageFamilyName || identity?.PackageFamilyName;
+  const appId = app.appId || identity?.AppId;
+  if (!family || !appId) throw new Error('无法确认 Windows package identity / AppId，已停止启动以避免破坏原客户端 UI');
+
+  // 通过 Windows 官方 IApplicationActivationManager 激活 Store/MSIX 应用。
+  // 这与直接执行 WindowsApps 里的 ChatGPT.exe 不同：保留正常的 AppX 激活链路，
+  // 同时 ActivateApplication 的 arguments 参数允许传入 Chromium 调试端口。
+  const aumid = `${family}!${appId}`;
+  const args = `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port} --remote-allow-origins=http://127.0.0.1:${port}`;
+  const script = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class ChatGPTUsageActivation {
+  [ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+  private class ApplicationActivationManager {}
+
+  [ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"),
+   InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  private interface IApplicationActivationManager {
+    int ActivateApplication(
+      [MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
+      [MarshalAs(UnmanagedType.LPWStr)] string arguments,
+      uint options,
+      out uint processId);
+    int ActivateForFile(string appUserModelId, IntPtr itemArray, string verb, out uint processId);
+    int ActivateForProtocol(string appUserModelId, IntPtr itemArray, out uint processId);
+  }
+
+  public static uint Activate(string appUserModelId, string arguments) {
+    var manager = (IApplicationActivationManager)new ApplicationActivationManager();
+    uint pid;
+    int hr = manager.ActivateApplication(appUserModelId, arguments, 2, out pid);
+    if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+    return pid;
+  }
+}
+"@
+[void][ChatGPTUsageActivation]::Activate(${psQuote(aumid)}, ${psQuote(args)})
+`;
+
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 12000,
+  });
+  if (r.status !== 0) {
+    const detail = String(r.stderr || r.stdout || '').trim();
+    throw new Error(`无法通过 Windows AppX 激活接口启动桌面端${detail ? `：${detail}` : ''}`);
+  }
+}
+
 export async function launchWithPort(app, port, timeoutMs = 30000) {
-  spawnSync('/usr/bin/open', ['-a', app.path, '--args', `--remote-debugging-port=${port}`]);
+  if (process.platform === 'win32') {
+    if (app.packaged || app.packageFamilyName || /[\\/]WindowsApps[\\/]/i.test(app.path)) {
+      launchPackagedWindowsApp(app, port);
+    } else {
+      const child = spawn(app.path, [
+        '--remote-debugging-address=127.0.0.1',
+        `--remote-debugging-port=${port}`,
+        `--remote-allow-origins=http://127.0.0.1:${port}`,
+      ], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false,
+      });
+      child.unref();
+    }
+  } else {
+    spawnSync('/usr/bin/open', ['-a', app.path, '--args', `--remote-debugging-port=${port}`]);
+  }
+
+  const waitMs = process.platform === 'win32' ? Math.max(timeoutMs, 180000) : timeoutMs;
   const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
+  while (Date.now() - t0 < waitMs) {
     if (await isPortOpen(port)) return true;
-    await sleep(500);
+    await sleep(process.platform === 'win32' ? 400 : 500);
   }
   return false;
 }
 
-// ---------- 启动器：一个不显示程序坞图标的小 .app，负责以调试模式打开 Codex 并运行组件 ----------
-export const LAUNCHER_LOG = path.join(os.homedir(), 'Library', 'Logs', 'chatgpt-usage-visualizer.log');
-
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const xmlEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const cmdQuote = (s) => `"${String(s).replace(/"/g, '""')}"`;
+
+function installWindowsLauncher({ app, name, nodePath, toolPath, extraArgs }) {
+  const launcherName = safeLauncherName(name || app.name || 'ChatGPT Usage');
+  fs.mkdirSync(WIN_LAUNCHER_DIR, { recursive: true });
+
+  const launcherPath = path.join(WIN_LAUNCHER_DIR, `${launcherName}.cmd`);
+  const args = ['start', '--yes', '--with-app', ...extraArgs].map(cmdQuote).join(' ');
+  const log = LAUNCHER_LOG;
+
+  fs.writeFileSync(launcherPath, `@echo off\r\nREM chatgpt-usage-visualizer launcher\r\nif not exist ${cmdQuote(nodePath)} (\r\n  echo Node.js not found. Re-run install.\r\n  pause\r\n  exit /b 1\r\n)\r\nif not exist ${cmdQuote(toolPath)} (\r\n  echo chatgpt-usage-visualizer files not found. Re-run install.\r\n  pause\r\n  exit /b 1\r\n)\r\nstart "" /b ${cmdQuote(nodePath)} ${cmdQuote(toolPath)} ${args} >> ${cmdQuote(log)} 2>&1\r\n`, 'utf8');
+
+  // 创建开始菜单快捷方式。失败不影响 .cmd 启动器本身。
+  let shortcut = null;
+  const programs = process.env.APPDATA && path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+  if (programs) {
+    shortcut = path.join(programs, `${launcherName} (Usage).lnk`);
+    const script = [
+      '$w=New-Object -ComObject WScript.Shell',
+      `$s=$w.CreateShortcut(${psQuote(shortcut)})`,
+      `$s.TargetPath=${psQuote(process.env.ComSpec || 'cmd.exe')}`,
+      `$s.Arguments='/c ""' + ${psQuote(launcherPath)} + '""'`,
+      `$s.WorkingDirectory=${psQuote(path.dirname(toolPath))}`,
+      '$s.WindowStyle=7',
+      '$s.Save()',
+    ].join(';');
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    if (r.status !== 0) shortcut = null;
+  }
+
+  return { path: launcherPath, name: launcherName, removed: [], shortcut };
+}
 
 // 返回 { path, removed }：removed 为被替换掉的旧启动器路径（用于更新程序坞）
 export function installLauncherApp({ app, name, nodePath, toolPath, extraArgs = [] }) {
-  const launcherName = name || app.name;
-  const LAUNCHER_PATH = path.join(LAUNCHER_DIR, `${launcherName}.app`);
+  if (process.platform === 'win32') {
+    return installWindowsLauncher({ app, name, nodePath, toolPath, extraArgs });
+  }
+
+  const launcherName = safeLauncherName(name || app.name);
+  const LAUNCHER_PATH = path.join(MAC_LAUNCHER_DIR, `${launcherName}.app`);
   if (path.resolve(LAUNCHER_PATH) === path.resolve(app.path)) {
     throw new Error(`${app.path} 是原应用本身，请用 --launcher-name 换一个启动器名称`);
   }
@@ -73,7 +308,6 @@ export function installLauncherApp({ app, name, nodePath, toolPath, extraArgs = 
   fs.mkdirSync(path.join(contents, 'Resources'), { recursive: true });
   fs.mkdirSync(path.dirname(LAUNCHER_LOG), { recursive: true });
 
-  // 沿用 Codex 的图标
   let hasIcon = false;
   try {
     let icon = execFileSync('/usr/bin/defaults', ['read', path.join(app.path, 'Contents', 'Info'), 'CFBundleIconFile'], { encoding: 'utf8' }).trim();
@@ -108,8 +342,6 @@ if [ ! -x ${shq(nodePath)} ] || [ ! -f ${shq(toolPath)} ]; then
   open -a ${shq(app.path)}
   exit 1
 fi
-# 在后台运行组件后立即退出。启动器进程若一直存活，macOS 会认为应用已打开，
-# 再次点击程序坞图标时会报"应用程序已不能再打开"
 /usr/bin/nohup ${shq(nodePath)} ${shq(toolPath)} ${args} >> ${shq(LAUNCHER_LOG)} 2>&1 < /dev/null &
 disown
 exit 0
@@ -122,10 +354,20 @@ exit 0
 export function uninstallLauncherApp() {
   const found = findInstalledLaunchers();
   for (const p of found) fs.rmSync(p, { recursive: true, force: true });
+  if (process.platform === 'win32') {
+    const programs = process.env.APPDATA && path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+    if (programs) {
+      let entries = [];
+      try { entries = fs.readdirSync(programs); } catch {}
+      for (const e of entries.filter((x) => / \(Usage\)\.lnk$/i.test(x))) {
+        try { fs.rmSync(path.join(programs, e), { force: true }); } catch {}
+      }
+    }
+  }
   return found;
 }
 
-// ---------- 程序坞：把原 Codex 图标替换为启动器（可还原） ----------
+// ---------- macOS 程序坞支持 ----------
 const PB = '/usr/libexec/PlistBuddy';
 const DOCK_BACKUP = path.join(os.homedir(), '.chatgpt-usage-visualizer', 'dock-backup.plist');
 const pb = (file, cmd) => execFileSync(PB, ['-c', cmd, file], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -147,10 +389,11 @@ function retarget(tmp, i, targetPath) {
   pb(tmp, `Set ${base}:file-data:_CFURLString ${pathToFileURL(targetPath).href}/`);
   tryPb(tmp, `Delete ${base}:book`);
   tryPb(tmp, `Delete ${base}:bundle-identifier`);
-  tryPb(tmp, `Delete ${base}:file-label`); // 让程序坞按应用本身的名字显示
+  tryPb(tmp, `Delete ${base}:file-label`);
 }
 
 function editDock(fn) {
+  if (process.platform !== 'darwin') return 'unchanged';
   const tmp = path.join(os.tmpdir(), `chatgpt-usage-dock-${process.pid}.plist`);
   execFileSync('/usr/bin/defaults', ['export', 'com.apple.dock', tmp]);
   const result = fn(tmp, readDockTiles(tmp));
@@ -162,8 +405,8 @@ function editDock(fn) {
   return result;
 }
 
-// 返回 'replaced' | 'added' | 'exists'；oldPaths 为旧启动器路径，会被改指向新启动器
 export function dockInstall(appPath, LAUNCHER_PATH, oldPaths = []) {
+  if (process.platform !== 'darwin') return 'exists';
   return editDock((tmp, tiles) => {
     if (!fs.existsSync(DOCK_BACKUP)) {
       fs.mkdirSync(path.dirname(DOCK_BACKUP), { recursive: true });
@@ -187,8 +430,8 @@ export function dockInstall(appPath, LAUNCHER_PATH, oldPaths = []) {
   }).replace('unchanged', 'exists');
 }
 
-// 把启动器图标换回原应用；返回 'restored' | 'none'
 export function dockRestore(app, launcherPaths) {
+  if (process.platform !== 'darwin') return 'none';
   return editDock((tmp, tiles) => {
     const t = tiles.find((x) => launcherPaths.includes(x.path));
     if (!t) return 'unchanged';
@@ -198,9 +441,18 @@ export function dockRestore(app, launcherPaths) {
   }).replace('unchanged', 'none');
 }
 
-// 延迟几秒后通过启动器重新打开 Codex（独立进程，调用方退出也不影响）
-export function relaunchLater(LAUNCHER_PATH, seconds = 15) {
-  const child = spawn('/bin/sh', ['-c', `sleep ${Number(seconds)}; /usr/bin/open ${shq(LAUNCHER_PATH)}`], {
+export function relaunchLater(launcherPath, seconds = 15) {
+  if (process.platform === 'win32') {
+    const script = `Start-Sleep -Seconds ${Math.max(0, Number(seconds) || 0)}; Start-Process -FilePath ${psQuote(process.env.ComSpec || 'cmd.exe')} -ArgumentList '/c',${psQuote('"' + launcherPath + '"')} -WindowStyle Hidden`;
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.unref();
+    return;
+  }
+  const child = spawn('/bin/sh', ['-c', `sleep ${Number(seconds)}; /usr/bin/open ${shq(launcherPath)}`], {
     detached: true,
     stdio: 'ignore',
   });

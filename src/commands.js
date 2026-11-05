@@ -11,7 +11,7 @@ import { findApp, isRunning } from './app.js';
 import { findCodexBin } from './appServer.js';
 import { UsageSync } from './sync.js';
 import { Injector, isPortOpen, listTargets, pickMainTargets } from './cdp.js';
-import { launchWithPort, quitApp, installLauncherApp, uninstallLauncherApp, findInstalledLaunchers, LAUNCHER_LOG, dockInstall, dockRestore, relaunchLater } from './launcher.js';
+import { launchWithPort, quitApp, installLauncherApp, uninstallLauncherApp, findInstalledLaunchers, LAUNCHER_LOG, dockInstall, dockRestore, relaunchLater, resolveWindowsDebugPort, findRunningWindowsDebugPort } from './launcher.js';
 import { codexBusy, askDialog, notify } from './busy.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -32,9 +32,16 @@ async function confirm(q) {
   return a === 'y' || a === 'yes';
 }
 
+function bringToFront(app) {
+  if (!app) return;
+  if (process.platform === 'darwin') {
+    spawnSync('/usr/bin/open', ['-a', app.path]);
+  }
+  // Windows 下避免重复启动应用实例；已有窗口保持原状即可。
+}
+
 const TITLE = 'Codex 额度组件';
 
-// 等待任务结束：连续两次检测为空闲才算结束；返回 'idle' 或 'quit'（用户自己退出了 Codex）
 async function waitUntilIdle(app, cfg) {
   const pollMs = (cfg.busy?.pollSec ?? 5) * 1000;
   let idleCount = 0, lastReason = '';
@@ -51,12 +58,44 @@ async function waitUntilIdle(app, cfg) {
 
 const CANCELLED = Symbol('cancelled');
 
-// 返回 app（端口已开启时可能为 null）；返回 CANCELLED 表示用户选择暂不重启
 async function ensureDebugApp(cfg, { withApp = false } = {}) {
   const app = findApp(cfg.appNames);
-  // 调试端口已开启时可以直接使用，不强制要求找到应用
+
+  if (process.platform === 'win32') {
+    // 如果已经是由 Usage 启动器打开的实例，复用它实际使用的端口。
+    const runningPort = findRunningWindowsDebugPort();
+    if (runningPort && await isPortOpen(runningPort)) {
+      cfg.debugPort = runningPort;
+      return app;
+    }
+    if (await isPortOpen(cfg.debugPort)) return app;
+
+    if (!app) {
+      throw new Error(`找不到 Codex/ChatGPT Windows 桌面端（尝试过：${cfg.appNames.join('、')}）。可用 --app "C:\\完整路径\\ChatGPT.exe" 指定。`);
+    }
+
+    // Windows 上绝不自动结束/重启用户已经打开的官方客户端。
+    // 已运行但没有 CDP 时，让用户正常退出，再从 Usage 启动器启动。
+    if (isRunning(app.path)) {
+      throw new Error(
+        `${app.name} 已经在运行，但没有开放本机 CDP。请先在官方界面中正常退出 ${app.name}，确认窗口和后台进程结束后，再从 Usage 快捷方式启动；本工具不会强制结束现有会话。`
+      );
+    }
+
+    cfg.debugPort = await resolveWindowsDebugPort(cfg.debugPort);
+    log(`正在通过 Windows AppX/桌面启动链路打开 ${app.name}（CDP 127.0.0.1:${cfg.debugPort}）…`);
+    if (!(await launchWithPort(app, cfg.debugPort, 180000))) {
+      throw new Error(`调试端口 ${cfg.debugPort} 在 180 秒内没有出现。已停止组件启动，不会 reload 或修改官方 UI。`);
+    }
+    return app;
+  }
+
   if (await isPortOpen(cfg.debugPort)) return app;
-  if (!app) throw new Error(`找不到 Codex 应用（尝试过：${cfg.appNames.join('、')}）。可用 --app "应用名" 指定。`);
+  if (!app) {
+    throw new Error(`找不到 Codex/ChatGPT 应用（尝试过：${cfg.appNames.join('、')}）。可用 --app "应用名" 指定。`);
+  }
+
+  // macOS 保留原项目的启动/重启交互。
   if (isRunning(app.path)) {
     const b = codexBusy(app, cfg);
     if (withApp) {
@@ -64,9 +103,9 @@ async function ensureDebugApp(cfg, { withApp = false } = {}) {
         log(`${app.name} 正以普通方式运行，且可能正在执行任务（${b.reason}）`);
         const choice = askDialog({
           title: TITLE,
-          message: `检测到 ${app.name} 可能正在执行任务（判断依据：${b.reason}）。\n\n显示额度组件需要重启 ${app.name}，现在重启会中断当前任务。\n\n如果你确认当前没有任务在运行（例如只是刚结束一次对话或安装），可以直接点击"立即重启"。\n\n选择"任务完成后自动重启"，会在任务结束后自动重启；选择"稍后手动重启"，可以在方便时退出 ${app.name}，再从程序坞重新打开。`,
+          message: `检测到 ${app.name} 可能正在执行任务（判断依据：${b.reason}）。\n\n显示额度组件需要重启 ${app.name}，现在重启会中断当前任务。\n\n如果你确认当前没有任务在运行，可以选择立即重启；也可以等待任务完成后重启，或者稍后手动重启。`,
           buttons: ['稍后手动重启', '立即重启', '任务完成后自动重启'],
-          defaultButton: '任务完成后自动重启',
+          defaultButton: '稍后手动重启',
           cancelButton: '稍后手动重启',
         });
         log(`用户选择：${choice || '关闭对话框'}`);
@@ -76,21 +115,23 @@ async function ensureDebugApp(cfg, { withApp = false } = {}) {
           if (r === 'quit') { log(`${app.name} 已被退出，停止等待`); return CANCELLED; }
           notify(TITLE, `任务已完成，正在重启 ${app.name}`);
         } else if (choice !== '立即重启') {
-          spawnSync('/usr/bin/open', ['-a', app.path]);
+          bringToFront(app);
           return CANCELLED;
         }
       }
     } else {
       const warn = b.busy ? `检测到它可能正在执行任务（${b.reason}），` : '';
       const ok = await confirm(`需要重启 ${app.name} 以开启调试端口，${warn}正在运行的任务会被中断。现在重启？`);
-      if (!ok) throw new Error('已取消。也可以先手动退出 Codex 再运行本命令。');
+      if (!ok) throw new Error('已取消。也可以先手动退出 Codex/ChatGPT 再运行本命令。');
     }
+
     log(`正在退出 ${app.name}…`);
     if (!(await quitApp(app))) throw new Error(`${app.name} 未能在 20 秒内退出，请手动退出后重试。`);
   }
+
   log(`正在以调试模式启动 ${app.name}…`);
   if (!(await launchWithPort(app, cfg.debugPort))) {
-    throw new Error(`调试端口 ${cfg.debugPort} 没有打开。这个版本的 Codex 可能禁用了调试端口。`);
+    throw new Error(`调试端口 ${cfg.debugPort} 没有打开。`);
   }
   return app;
 }
@@ -99,20 +140,21 @@ export async function start() {
   const cfg = sidebarConfig();
   const withApp = flag('with-app');
   let locked = acquireLock();
+
   if (!locked && withApp) {
-    // 另一个实例可能正在随 Codex 退出，稍等它释放
     const a = findApp(cfg.appNames);
     if (a && !isRunning(a.path)) {
       for (let i = 0; i < 16 && !locked; i++) { await sleep(500); locked = acquireLock(); }
     }
   }
+
   if (!locked) {
-    // 已有实例在运行（或正在等待任务结束）：只需把 Codex 调到前台
     const a = findApp(cfg.appNames);
-    if (withApp && a) spawnSync('/usr/bin/open', ['-a', a.path]);
+    if (withApp && a) bringToFront(a);
     log('组件已在运行，无需重复启动。');
     return;
   }
+
   let app;
   try {
     app = await ensureDebugApp(cfg, { withApp });
@@ -120,11 +162,13 @@ export async function start() {
     releaseLock();
     throw e;
   }
+
   if (app === CANCELLED) {
     releaseLock();
     log('暂不重启，组件未启动。');
     return;
   }
+
   const codexBin = findCodexBin(cfg, app && app.path);
   if (!codexBin) log('没有找到 codex 可执行文件，将只使用会话记录作为数据源（数据可能不是最新）。');
 
@@ -157,38 +201,40 @@ export async function start() {
     log(reason || '已停止并移除组件。');
     process.exit(0);
   };
+
   const loop = async () => {
     const portOpen = await isPortOpen(cfg.debugPort);
-    // 随 Codex 一起退出：连续两次检测到调试端口关闭就停止。
-    // 不再要求"应用已不在运行"：否则 Codex 退出后很快又被以普通方式打开时，
-    // 本进程会一直占着运行锁，之后点启动器只会提示"组件已在运行"而没有任何效果
     if (withApp && !portOpen) {
       if (++closedChecks >= 2) {
         const reopened = app && isRunning(app.path);
-        return shutdown(reopened ? 'Codex 已退出并以普通方式重新打开，组件停止；请从程序坞重新打开以显示组件。' : 'Codex 已退出，组件随之停止。');
+        return shutdown(reopened
+          ? 'Codex/ChatGPT 已退出并以普通方式重新打开，组件停止；请从 Usage 启动器重新打开。'
+          : 'Codex/ChatGPT 已退出，组件随之停止。');
       }
       return;
     }
+
     closedChecks = 0;
     if (portOpen) {
-      if (waitingLogged) { log('检测到 Codex 已以调试模式运行'); waitingLogged = false; }
+      if (waitingLogged) { log('检测到 Codex/ChatGPT 已以调试模式运行'); waitingLogged = false; }
       await injector.scan();
       if (++ticks % 6 === 0) {
         const st = await injector.status();
         const lost = st.length > 0 && st.every((s) => s && !s.anchorFound && !s.mounted);
         if (lost && !anchorWarned) {
-          log(`找不到挂载点，Codex 界面可能已更新。请检查 ${USER_CONFIG_PATH} 中的 mount.anchorSelectors。`);
+          log(`找不到挂载点，桌面端界面可能已更新。请检查 ${USER_CONFIG_PATH} 中的 mount.anchorSelectors。`);
           anchorWarned = true;
         } else if (!lost) anchorWarned = false;
       }
     } else if (!waitingLogged) {
-      log('Codex 未以调试模式运行（可能已退出）。请运行 chatgpt-usage start 重新启动，或保持本窗口等待。');
+      log('Codex/ChatGPT 未以调试模式运行（可能已退出）。请运行 chatgpt-usage start 重新启动，或保持本窗口等待。');
       waitingLogged = true;
     }
   };
+
   await loop();
   iv = setInterval(loop, withApp ? 3000 : 5000);
-  log(withApp ? '组件已运行，将随 Codex 一起退出。' : '组件已运行，按 Ctrl+C 停止并移除组件。');
+  log(withApp ? '组件已运行，将随 Codex/ChatGPT 一起退出。' : '组件已运行，按 Ctrl+C 停止并移除组件。');
   process.on('SIGINT', () => shutdown());
   process.on('SIGTERM', () => shutdown());
 }
@@ -203,6 +249,7 @@ function acquireLock() {
   fs.writeFileSync(LOCK, String(process.pid));
   return true;
 }
+
 function releaseLock() {
   try { if (Number(fs.readFileSync(LOCK, 'utf8')) === process.pid) fs.unlinkSync(LOCK); } catch {}
 }
@@ -215,10 +262,14 @@ export async function installSidebar(cfg, app) {
     toolPath: TOOL_PATH,
     extraArgs: [opt('app') ? ['--app', opt('app')] : [], opt('port') ? ['--port', opt('port')] : []].flat(),
   });
+
   const dest = launcher.path;
   console.log(`✓ 侧栏组件：已创建启动器"${launcher.name}"：${dest}`);
 
-  if (flag('dock')) {
+  if (process.platform === 'win32') {
+    if (launcher.shortcut) console.log(`✓ Windows 开始菜单快捷方式：${launcher.shortcut}`);
+    else console.log('· 未能创建开始菜单快捷方式，可直接双击上面的 .cmd 启动器');
+  } else if (flag('dock')) {
     try {
       const r = dockInstall(app.path, dest, launcher.removed);
       console.log({
@@ -235,10 +286,13 @@ export async function installSidebar(cfg, app) {
 
   if (flag('relaunch')) {
     relaunchLater(dest, Number(opt('relaunch-delay') || 15));
-    console.log(`✓ 将在 ${opt('relaunch-delay') || 15} 秒后通过启动器重新打开 ${app.name}（如正在运行会先退出）`);
+    console.log(`✓ 将在 ${opt('relaunch-delay') || 15} 秒后通过启动器重新打开 ${app.name}（如正在运行会先询问/处理）`);
+  } else if (process.platform === 'win32') {
+    console.log(`· 请先完全退出 ${app.name}，再从开始菜单运行 "${launcher.name} (Usage)"`);
   } else {
     console.log(`· 侧栏组件需要退出 ${app.name} 后从程序坞的启动器重新打开才会出现`);
   }
+
   console.log(`  日志：${LAUNCHER_LOG}`);
   return dest;
 }
@@ -246,7 +300,9 @@ export async function installSidebar(cfg, app) {
 export function removeSidebar(cfg) {
   const launchers = findInstalledLaunchers();
   if (!launchers.length) return false;
-  try { dockRestore(findApp(cfg.appNames), launchers); } catch {}
+  if (process.platform === 'darwin') {
+    try { dockRestore(findApp(cfg.appNames), launchers); } catch {}
+  }
   uninstallLauncherApp();
   return true;
 }
@@ -256,19 +312,17 @@ export async function relaunch() {
   const [launcher] = findInstalledLaunchers();
   if (!launcher) throw new Error('没有找到启动器，请先运行 install');
   relaunchLater(launcher, sec);
-  console.log(`✓ 将在 ${sec} 秒后通过启动器重新打开 Codex（如正在运行会先退出）`);
+  console.log(`✓ 将在 ${sec} 秒后通过启动器重新打开 Codex/ChatGPT`);
   console.log('RELAUNCH_RESULT=scheduled');
 }
 
-
-// 侧栏模式相关的环境检查
 export async function doctorSidebar(ok) {
   const cfg = sidebarConfig();
   const port = await isPortOpen(cfg.debugPort);
-  ok(port, `侧栏模式：调试端口 ${cfg.debugPort}${port ? ' 已开启' : ' 未开启（从启动器打开 Codex 时会自动开启）'}`);
+  ok(port, `侧栏模式：调试端口 ${cfg.debugPort}${port ? ' 已开启' : ' 未开启（从 Usage 启动器打开时会自动开启）'}`);
   if (port) {
     const targets = pickMainTargets(await listTargets(cfg.debugPort), cfg.targetFilter);
-    ok(targets.length > 0, `侧栏模式：Codex 主窗口 ${targets.length} 个`);
+    ok(targets.length > 0, `侧栏模式：Codex/ChatGPT 主窗口 ${targets.length} 个`);
   }
   const launchers = findInstalledLaunchers();
   ok(true, launchers.length ? `侧栏模式：已安装启动器 ${launchers.join('、')}` : '侧栏模式：未安装');

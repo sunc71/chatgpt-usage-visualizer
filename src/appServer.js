@@ -8,23 +8,46 @@ import { normalizeSnapshot } from './normalize.js';
 const VERSION = '0.6.0';
 
 // 查找 codex 可执行文件：配置 > 桌面端安装包内置 > PATH
-// 每个候选都先试运行 `--version`，跳过安装损坏的（例如 npm 安装缺少平台二进制）
+// 每个候选都先试运行 `--version`，跳过安装损坏的版本。
 export function findCodexBin(cfg, appPath) {
   const candidates = [];
   if (cfg.codexBin) candidates.push(cfg.codexBin);
+
   if (appPath) {
-    for (const sub of ['Resources', 'MacOS']) {
-      const found = searchExecutable(path.join(appPath, 'Contents', sub), 'codex', 5);
-      if (found) candidates.push(found);
+    if (process.platform === 'win32') {
+      const appDir = path.dirname(appPath);
+      for (const dir of [
+        appDir,
+        path.join(appDir, 'resources'),
+        path.join(appDir, 'Resources'),
+        path.join(appDir, 'resources', 'bin'),
+        path.join(appDir, 'resources', 'app'),
+      ]) {
+        const found = searchExecutable(dir, 'codex.exe', 5) || searchExecutable(dir, 'codex', 5);
+        if (found) candidates.push(found);
+      }
+    } else {
+      for (const sub of ['Resources', 'MacOS']) {
+        const found = searchExecutable(path.join(appPath, 'Contents', sub), 'codex', 5);
+        if (found) candidates.push(found);
+      }
     }
   }
+
   try {
-    const p = execFileSync('/usr/bin/which', ['codex'], { encoding: 'utf8' }).trim();
+    const locator = process.platform === 'win32' ? 'where.exe' : '/usr/bin/which';
+    const args = process.platform === 'win32' ? ['codex.exe'] : ['codex'];
+    const p = execFileSync(locator, args, {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5000,
+    }).split(/\r?\n/).map((x) => x.trim()).find(Boolean);
     if (p) candidates.push(p);
   } catch {}
-  for (const c of candidates) {
+
+  for (const c of [...new Set(candidates)]) {
     try {
-      execFileSync(c, ['--version'], { stdio: 'ignore', timeout: 10000 });
+      execFileSync(c, ['--version'], { stdio: 'ignore', timeout: 10000, windowsHide: true });
       return c;
     } catch {}
   }
@@ -37,7 +60,8 @@ function searchExecutable(dir, name, depth) {
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
   for (const e of entries) {
     const full = path.join(dir, e.name);
-    if (e.isFile() && e.name === name) {
+    if (e.isFile() && e.name.toLowerCase() === name.toLowerCase()) {
+      if (process.platform === 'win32') return full;
       try { fs.accessSync(full, fs.constants.X_OK); return full; } catch {}
     }
   }
@@ -63,7 +87,15 @@ export class AppServerClient extends EventEmitter {
   }
 
   async start() {
-    this.proc = spawn(this.bin, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    // Windows 不能像 Unix 一样依赖 shebang 直接执行 .js 测试桩/脚本。
+    // 真正的 codex.exe 仍然直接执行。
+    const scriptBin = /\.m?js$/i.test(this.bin);
+    const command = scriptBin ? process.execPath : this.bin;
+    const argv = scriptBin ? [this.bin, 'app-server'] : ['app-server'];
+    this.proc = spawn(command, argv, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
     this.proc.on('exit', (code) => {
       for (const { reject } of this.pending.values()) reject(new Error(`app-server 已退出 (${code})`));
       this.pending.clear();
@@ -134,6 +166,19 @@ export class AppServerClient extends EventEmitter {
   }
 
   stop() {
-    if (this.proc) this.proc.kill();
+    if (!this.proc) return;
+    const proc = this.proc;
+    this.proc = null;
+    if (process.platform === 'win32' && proc.pid) {
+      try {
+        execFileSync('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], {
+          stdio: 'ignore',
+          windowsHide: true,
+          timeout: 5000,
+        });
+        return;
+      } catch {}
+    }
+    try { proc.kill(); } catch {}
   }
 }

@@ -17,6 +17,8 @@
     "CLAUDE.md",
     "install.sh",
     "uninstall.sh",
+    "install.ps1",
+    "uninstall.ps1",
     "LICENSE"
   ],
   "scripts": {
@@ -28,7 +30,8 @@
     "node": ">=22"
   },
   "os": [
-    "darwin"
+    "darwin",
+    "win32"
   ],
   "license": "MIT",
   "keywords": [

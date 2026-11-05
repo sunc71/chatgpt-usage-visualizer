@@ -15,14 +15,26 @@ export async function isPortOpen(port) {
   }
 }
 
+function isWindowsMainRenderer(urlText) {
+  try {
+    const url = new URL(String(urlText || ''));
+    if (url.protocol !== 'app:' || url.hostname !== '-' || url.pathname !== '/index.html') return false;
+    const initialRoute = url.searchParams.get('initialRoute');
+    if (initialRoute === null) return true;
+    // Windows 的独立 Codex 任务窗口也是正常 renderer；avatar overlay / detached shell 等仍排除。
+    return /^\\/local\\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\/?$/i.test(initialRoute);
+  } catch {
+    return false;
+  }
+}
+
 export function pickMainTargets(targets, filter) {
-  return targets.filter(
-    (t) =>
-      t.type === 'page' &&
-      t.webSocketDebuggerUrl &&
-      String(t.url).startsWith(filter.urlPrefix) &&
-      !filter.excludeUrlIncludes.some((s) => String(t.url).includes(s)),
-  );
+  return targets.filter((t) => {
+    if (t.type !== 'page' || !t.webSocketDebuggerUrl) return false;
+    if (process.platform === 'win32') return isWindowsMainRenderer(t.url);
+    return String(t.url).startsWith(filter.urlPrefix)
+      && !filter.excludeUrlIncludes.some((s) => String(t.url).includes(s));
+  });
 }
 
 class CdpSession {
@@ -109,21 +121,29 @@ export class Injector {
         const s = await CdpSession.connect(t.webSocketDebuggerUrl);
         this.sessions.set(t.id, s);
         s.on('close', () => this.sessions.delete(t.id));
-        s.on('Page.loadEventFired', () => this.#pushTo(s).catch(() => {}));
+        s.on('Page.loadEventFired', () => this.#installInto(s).catch(() => {}));
         // 组件里的"刷新"按钮通过这个绑定通知本程序
         s.on('Runtime.bindingCalled', (p) => { if (p.name === '__codexUsageRefresh') this.onRefresh(); });
         await s.send('Runtime.enable');
         await s.send('Runtime.addBinding', { name: '__codexUsageRefresh' });
         await s.send('Page.enable');
-        await s.send('Page.addScriptToEvaluateOnNewDocument', { source: this.widgetSource });
-        await s.evaluate(this.widgetSource);
-        await this.#pushTo(s);
+        // macOS 保留原版的 document-start 注入行为。
+        // Windows 等官方 renderer 正常完成初始化后再 Runtime.evaluate，避免干扰启动期 UI。
+        if (process.platform !== 'win32') {
+          await s.send('Page.addScriptToEvaluateOnNewDocument', { source: this.widgetSource });
+        }
+        await this.#installInto(s);
         this.log(`已注入窗口：${t.title || t.url}`);
       } catch (e) {
         this.log(`注入失败（${t.title || t.id}）：${e.message}`);
       }
     }
     return this.sessions.size;
+  }
+
+  async #installInto(s) {
+    await s.evaluate(this.widgetSource);
+    await this.#pushTo(s);
   }
 
   async #pushTo(s) {

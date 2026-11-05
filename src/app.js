@@ -1,4 +1,4 @@
-// 查找与识别 Codex 桌面端应用（各显示模式共用）
+// 查找与识别 Codex / ChatGPT 桌面端应用（macOS + Windows）
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -9,6 +9,7 @@ const USER_APPS = path.join(os.homedir(), 'Applications');
 const GENERATED_ID_PREFIXES = ['local.chatgpt-usage-visualizer.', 'local.codex-usage-countdown.'];
 
 export function isGeneratedApp(appPath) {
+  if (process.platform !== 'darwin') return false;
   try {
     const plist = fs.readFileSync(path.join(appPath, 'Contents', 'Info.plist'), 'utf8');
     return GENERATED_ID_PREFIXES.some((id) => plist.includes(id));
@@ -17,8 +18,136 @@ export function isGeneratedApp(appPath) {
   }
 }
 
-// 依次在常见目录和 Spotlight 中查找桌面端应用（跳过本工具生成的应用）
+function normalizeName(name) {
+  return String(name || '').replace(/\.exe$/i, '').replace(/\.app$/i, '');
+}
+
+function windowsCandidates(name) {
+  const raw = String(name || '');
+  const n = normalizeName(raw);
+  const out = [];
+
+  // --app 允许直接传 exe 的完整路径。
+  if (/[\\/]/.test(raw) || /^[A-Za-z]:/.test(raw)) {
+    out.push(raw);
+    if (!/\.exe$/i.test(raw)) out.push(`${raw}.exe`);
+  }
+
+  const roots = [
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs'),
+    process.env.LOCALAPPDATA,
+    process.env.ProgramFiles,
+    process.env['ProgramFiles(x86)'],
+  ].filter(Boolean);
+
+  for (const root of roots) {
+    out.push(
+      path.join(root, n, `${n}.exe`),
+      path.join(root, 'OpenAI', `${n}.exe`),
+      path.join(root, 'OpenAI', n, `${n}.exe`),
+    );
+  }
+
+  // WindowsApps 中的 App Execution Alias 也可能可直接执行。
+  if (process.env.LOCALAPPDATA) {
+    out.push(path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WindowsApps', `${n}.exe`));
+  }
+
+  return [...new Set(out)];
+}
+
+function findPackagedWindowsApp(names) {
+  const wanted = new Set(names.map((n) => normalizeName(n).toLowerCase()));
+  const script = `
+$items = Get-AppxPackage -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -like 'OpenAI.*' -and $_.Status -eq 'Ok' }
+$out = foreach ($pkg in $items) {
+  try {
+    $manifest = Get-AppxPackageManifest -Package $pkg
+    $apps = @($manifest.Package.Applications.Application)
+    $app = $apps | Where-Object { [string]$_.Executable -match '(?i)(ChatGPT|Codex)\\.exe$' } | Select-Object -First 1
+    if (-not $app) { $app = $apps | Select-Object -First 1 }
+    if ($app) {
+      $exe = Join-Path $pkg.InstallLocation ([string]$app.Executable)
+      [pscustomobject]@{
+        Name = $pkg.Name
+        PackageFamilyName = $pkg.PackageFamilyName
+        InstallLocation = $pkg.InstallLocation
+        Version = $pkg.Version.ToString()
+        AppId = [string]$app.Id
+        Executable = $exe
+      }
+    }
+  } catch {}
+}
+$out | ConvertTo-Json -Compress
+`;
+  try {
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 10000,
+      maxBuffer: 4 * 1024 * 1024,
+    }).trim();
+    if (!out) return null;
+    const parsed = JSON.parse(out);
+    const pkgs = Array.isArray(parsed) ? parsed : [parsed];
+    for (const pkg of pkgs) {
+      const exe = String(pkg.Executable || '');
+      const base = normalizeName(path.basename(exe));
+      if (wanted.size && !wanted.has(base.toLowerCase())) continue;
+      try {
+        if (exe && fs.existsSync(exe) && fs.statSync(exe).isFile()) {
+          return {
+            name: base || 'ChatGPT',
+            path: exe,
+            packaged: true,
+            packageFamilyName: pkg.PackageFamilyName,
+            packageName: pkg.Name,
+            packageVersion: pkg.Version,
+            appId: pkg.AppId,
+          };
+        }
+      } catch {}
+    }
+  } catch {}
+  return null;
+}
+
+function findWindowsApp(names) {
+  // Microsoft Store/MSIX 版本必须优先按包身份识别，不能把 WindowsApps 里的 exe 当普通程序启动。
+  const packaged = findPackagedWindowsApp(names);
+  if (packaged) return packaged;
+
+  for (const name of names) {
+    for (const candidate of windowsCandidates(name)) {
+      try {
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return { name: normalizeName(name), path: candidate };
+        }
+      } catch {}
+    }
+  }
+
+  // 最后尝试 PATH / App Execution Alias。
+  for (const name of names) {
+    const exe = /\.exe$/i.test(name) ? name : `${name}.exe`;
+    try {
+      const hit = execFileSync('where.exe', [exe], {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 5000,
+      }).split(/\r?\n/).map((x) => x.trim()).find(Boolean);
+      if (hit) return { name: normalizeName(name), path: hit };
+    } catch {}
+  }
+  return null;
+}
+
+// 依次在常见目录和系统索引中查找桌面端应用（跳过本工具生成的应用）
 export function findApp(names) {
+  if (process.platform === 'win32') return findWindowsApp(names);
+
   const dirs = ['/Applications', USER_APPS];
   for (const n of names) {
     for (const d of dirs) {
@@ -38,13 +167,32 @@ export function findApp(names) {
 
 const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+function windowsProcessMatches(appPath) {
+  const escaped = String(appPath).replace(/'/g, "''");
+  const script = [
+    `$target = [IO.Path]::GetFullPath('${escaped}')`,
+    '$found = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |',
+    '  Where-Object { $_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath) -ieq $target) } |',
+    '  Select-Object -First 1',
+    'if ($found) { exit 0 } else { exit 1 }',
+  ].join(' ');
+  return spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true,
+    stdio: 'ignore',
+    timeout: 5000,
+  }).status === 0;
+}
+
 export function isRunning(appPath) {
+  if (process.platform === 'win32') return windowsProcessMatches(appPath);
+
   // 从行首精确匹配，避免把 ~/Applications 下的同名启动器误认为原应用
   const r = spawnSync('/usr/bin/pgrep', ['-f', `^${reEscape(path.join(appPath, 'Contents', 'MacOS'))}/`]);
   return r.status === 0;
 }
 
 export function bundleId(appPath) {
+  if (process.platform !== 'darwin') return '';
   try {
     return execFileSync('/usr/bin/defaults', ['read', path.join(appPath, 'Contents', 'Info'), 'CFBundleIdentifier'], { encoding: 'utf8' }).trim();
   } catch {

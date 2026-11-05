@@ -1,192 +1,494 @@
 # ChatGPT Usage Visualizer
 
-ChatGPT / Codex 桌面端额度可视化工具：在 Codex 左侧栏"用量"按钮上方，常驻显示 **5 小时额度** 和 **每周额度** 的剩余比例与重置倒计时。点击组件可查看详情：剩余百分比、精确到秒的倒计时、重置时刻和同步状态。全自动同步，也可以随时手动刷新。
+> **Windows 版设计目标：保持原 macOS 版的形态。** Windows 不另做托盘、悬浮窗或独立 Dashboard；仍然使用原项目的 `src/widget.js`，把 5 小时 / 每周额度组件直接挂在 Codex 左侧栏“用量 / Usage”入口附近。Windows 只替换底层的 MSIX 启动、CDP 端口发现和 renderer 注入生命周期。
 
-<p align="center"><a href="https://ZGSQ-QIANG.github.io/chatgpt-usage-visualizer/demo/"><img src="docs/styles.gif" width="260" alt="四种图标样式"></a></p>
-<p align="center"><a href="https://ZGSQ-QIANG.github.io/chatgpt-usage-visualizer/demo/"><b>▶ 在线体验组件效果</b></a><br><sub>无需安装，可切换四种样式、模拟额度消耗与重置、切换深浅色</sub></p>
 
-<img src="docs/preview-light.png" width="360"> <img src="docs/preview-dark.png" width="360">
+在 **ChatGPT / Codex 桌面端侧边栏**显示额度信息，包括：
 
-> ⚠️ **非官方工具，与 OpenAI 无关。** 本工具通过 Chromium 调试端口向 Codex 界面注入组件，属于对官方客户端的非官方修改，可能违反 OpenAI 的使用条款，请自行评估风险；Codex 更新界面后组件可能暂时失效。
+- 5 小时额度剩余比例
+- 每周额度剩余比例
+- 重置倒计时 / 重置时间
+- 自动同步
+- 手动刷新
+- 圆环、沙漏、咖啡、电池四种样式
 
-## 让 AI 帮你安装
+> 非官方工具，与 OpenAI 无关。工具通过本机 Chromium DevTools 调试端口向桌面端页面注入组件。客户端更新后，组件选择器可能需要适配。
 
-把下面这段话发给你的 AI 编程助手（Codex、Claude Code 等能执行终端命令的助手），它会自动完成全部安装：
+> **Windows 用户注意**：本分支不会直接执行 `C:\\Program Files\\WindowsApps\\...\\ChatGPT.exe`。Microsoft Store/MSIX 版会通过 Windows 的 AppX 激活接口启动，以保留原客户端的 package identity 和正常 UI。若你安装过 2026-11-05 早期的 Windows 版本，请先执行下面的“更新旧版安装”步骤。
 
+<p align="center">
+  <img src="docs/preview-light.png" width="360">
+  <img src="docs/preview-dark.png" width="360">
+</p>
+
+---
+
+## 更新旧版 Windows 安装
+
+如果你之前安装过本 fork 的早期 Windows 版本，并出现 **原 UI 空白、一直 loading、发送按钮不可用或原界面无法正常使用**，先完全退出 ChatGPT/Codex，然后在仓库目录执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
+git pull
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
-请帮我安装这个工具：https://github.com/ZGSQ-QIANG/chatgpt-usage-visualizer
-按照仓库里 AGENTS.md 的步骤执行。
+
+旧版创建的 `(Usage)` 快捷方式会被删除并重新创建。
+
+如果只是想立即恢复官方客户端，不需要卸载官方 ChatGPT/Codex：**直接从 Windows 原来的开始菜单 ChatGPT/Codex 图标启动即可**。本工具不会修改官方安装包。
+
+---
+
+## Windows 10 / 11：直接安装
+
+### 1. 准备环境
+
+需要：
+
+- Windows 10 / 11
+- Node.js 22+
+- Git
+- ChatGPT 或 Codex Windows 桌面端
+
+检查 Node.js：
+
+```powershell
+node -v
 ```
 
-安装完成后 Codex 会自动重启一次，之后照常从程序坞点 Codex 图标打开即可。
+如果版本低于 22，请先安装新版 Node.js。
 
-## 运行要求
+---
 
-- macOS
-- Node.js 22 或更高版本（终端运行 `node -v` 查看，没有的话到 [nodejs.org](https://nodejs.org) 安装）
-- Codex 桌面端（ChatGPT.app 或 Codex.app）
+### 2. Clone Windows 版本
 
-## 快速开始
+打开 **PowerShell**：
 
-**1. 下载**
+```powershell
+git clone -b windows-support https://github.com/sunc71/chatgpt-usage-visualizer.git
+cd chatgpt-usage-visualizer
+```
 
-在本页面点击绿色的 Code 按钮 → Download ZIP，或者用 git：
+这里已经直接 clone `windows-support` 分支，不需要再执行 `git checkout`。
+
+---
+
+### 3. 检查环境
+
+```powershell
+node .\bin\chatgpt-usage.js doctor
+```
+
+正常情况下会看到类似：
+
+```text
+✓ Node.js ...
+✓ 系统：win32
+✓ 应用：...
+✓ codex 可执行文件：...
+```
+
+其中 `codex 可执行文件` 找不到并不一定导致工具完全不能用，工具还可以退回读取本地会话额度记录。
+
+---
+
+### 4. 一键安装
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+安装完成后：
+
+1. **完全退出 ChatGPT / Codex**
+2. 打开 Windows 开始菜单
+3. 找到：
+
+```text
+ChatGPT (Usage)
+```
+
+或者：
+
+```text
+Codex (Usage)
+```
+
+4. 从这个快捷方式启动
+
+以后也建议从这个 `(Usage)` 快捷方式启动桌面端。
+
+---
+
+## 如果自动找不到 ChatGPT / Codex
+
+先找到实际的 `.exe` 路径，然后运行：
+
+```powershell
+node .\bin\chatgpt-usage.js doctor --app "C:\完整路径\ChatGPT.exe"
+```
+
+确认正常后安装：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -App "C:\完整路径\ChatGPT.exe"
+```
+
+Codex 同理：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -App "C:\完整路径\Codex.exe"
+```
+
+---
+
+## Windows 日志
+
+默认日志：
+
+```text
+%LOCALAPPDATA%\ChatGPT Usage Visualizer\chatgpt-usage-visualizer.log
+```
+
+PowerShell 查看：
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\ChatGPT Usage Visualizer\chatgpt-usage-visualizer.log" -Tail 100
+```
+
+实时查看：
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\ChatGPT Usage Visualizer\chatgpt-usage-visualizer.log" -Wait
+```
+
+---
+
+## Windows 卸载
+
+在仓库目录运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
+```
+
+或者：
+
+```powershell
+node .\bin\chatgpt-usage.js uninstall
+```
+
+会删除本工具创建的启动器和开始菜单快捷方式。
+
+---
+
+## 更新
+
+进入仓库：
+
+```powershell
+cd chatgpt-usage-visualizer
+git pull
+```
+
+如果启动器相关代码发生更新，建议重新安装一次：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+---
+
+## Windows 常见问题
+
+### `doctor` 找不到桌面端
+
+直接指定 exe：
+
+```powershell
+node .\bin\chatgpt-usage.js doctor --app "C:\完整路径\ChatGPT.exe"
+```
+
+然后安装时同样加 `-App`。
+
+### 安装后组件没有出现
+
+确认：
+
+1. 原来的 ChatGPT / Codex 已经完全退出
+2. 是从开始菜单的 **`(Usage)` 快捷方式**启动
+3. 调试端口 9222 已开启
+
+检查：
+
+```powershell
+node .\bin\chatgpt-usage.js doctor
+```
+
+然后查看日志：
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\ChatGPT Usage Visualizer\chatgpt-usage-visualizer.log" -Tail 100
+```
+
+### 原 UI 空白 / 一直 loading
+
+当前版本 **不会对官方 renderer 执行 `Page.reload`**，也不会在 Windows 上自动强制结束已运行的 Codex。启动器会等待官方 MSIX/桌面客户端自行完成初始化，最长等待 180 秒；只有发现真实 `app://-/index.html` renderer 后才注入组件。
+
+如果官方客户端已经在普通模式运行但没有 CDP，工具会停止并提示你正常退出后重新从 Usage 启动器打开，不会替你强杀进程。
+
+### 调试端口 9222 没有打开
+
+本工具需要通过：
+
+```text
+--remote-debugging-port=9222
+```
+
+启动桌面客户端。
+
+部分 Windows Store / MSIX 安装版本可能不允许直接这样启动。如果遇到这种情况，优先尝试能够直接定位到 `ChatGPT.exe` / `Codex.exe` 的桌面安装版本。
+
+### PowerShell 不允许执行脚本
+
+直接使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+无需永久修改系统的 Execution Policy。
+
+---
+
+## 手动运行
+
+不安装快捷方式也可以：
+
+```powershell
+node .\bin\chatgpt-usage.js start
+```
+
+终端需要保持打开。
+
+按：
+
+```text
+Ctrl + C
+```
+
+停止。
+
+---
+
+## 常用命令
+
+```powershell
+# 环境检查
+node .\bin\chatgpt-usage.js doctor
+
+# 安装
+node .\bin\chatgpt-usage.js install
+
+# 手动启动
+node .\bin\chatgpt-usage.js start
+
+# 延迟重新启动
+node .\bin\chatgpt-usage.js relaunch
+
+# 卸载
+node .\bin\chatgpt-usage.js uninstall
+```
+
+常用参数：
+
+```text
+--app <应用名或 exe 路径>
+--launcher-name <启动器名称>
+--port <端口>
+--codex-bin <codex.exe 路径>
+--yes
+--debug
+```
+
+---
+
+## Windows 实现参考
+
+Windows 适配重点参考以下公开项目的成熟启动与 CDP 生命周期设计：
+
+- `JiaYang-BUAA/Codex-Desktop-Usage-Monitor-Windows`：MSIX 激活、动态 CDP 端口、最长 180 秒等待 renderer、Windows Codex 注入生命周期（MIT）。
+- `Hung2124/codex-multi-profile`：通过 `IApplicationActivationManager` 启动 Microsoft Store Codex，并明确避免直接执行 WindowsApps 内的 exe（MIT）。
+- `soulvon/AnyBridge`：Windows Codex package identity / CDP 启动实践（MIT）。
+- `DrFanghaiz/codex-usage-card`：参考新版 Codex 左侧栏原生“用量”入口的 DOM / 几何兼容思路；本项目不直接复制其未声明许可的源码。
+
+本 fork 保留原 macOS 组件的视觉和交互代码；参考项目主要用于 Windows 启动、renderer 识别和生命周期设计。
+
+---
+
+## macOS
+
+原项目的 macOS 支持仍然保留。
+
+### Clone
 
 ```bash
-cd ~
-git clone https://github.com/ZGSQ-QIANG/chatgpt-usage-visualizer.git
-cd ~/chatgpt-usage-visualizer
+git clone https://github.com/sunc71/chatgpt-usage-visualizer.git
+cd chatgpt-usage-visualizer
+git checkout windows-support
 ```
 
-如果下载的是 ZIP，请解压到用户主目录（例如 `~/chatgpt-usage-visualizer`），不要放在"下载"文件夹里运行，避免 macOS 权限问题。之后也不要再移动这个文件夹。
-
-**2. 检查环境**
+### 检查
 
 ```bash
 node bin/chatgpt-usage.js doctor
 ```
 
-每一项前面显示 ✓ 或 ✗。"app-server 额度读取"为 ✗ 也能用，只是会退回读取本地会话记录（见下文）。
-
-**3. 一键安装**
+### 安装
 
 ```bash
 ./install.sh
 ```
 
-会在 `~/Applications` 下生成一个与原应用同名、同图标的启动器（例如 `~/Applications/ChatGPT.app`），并把程序坞里原来的图标替换成它（原设置已备份，卸载时会还原；不想改程序坞可加 `--no-dock`）。完全退出 Codex 后，照常从程序坞点图标打开即可。想换启动器名称可加 `--launcher-name 名称`。卸载运行 `./uninstall.sh`。
+### 卸载
 
-## 使用方式
+```bash
+./uninstall.sh
+```
 
-**不想用启动器的话**，也可以每次手动运行 `node bin/chatgpt-usage.js start`，保持终端窗口开着，按 `Ctrl+C` 停止。
+macOS 日志：
 
-### 启动器的工作方式
+```text
+~/Library/Logs/chatgpt-usage-visualizer.log
+```
 
-- 点击启动器：以调试模式打开 Codex，并在后台运行组件，不需要开终端
-- 退出 Codex：组件在几秒内自动停止
-- 重复点击：不会启动多份，只会把 Codex 调到前台
-- 如果点启动器时 Codex 已经以普通方式打开：没有在执行任务就直接重启一次以开启调试端口；检测到可能正在执行任务时，会弹窗提醒重启会中断任务，并让你选择：
-  - **任务完成后自动重启**：后台等待任务结束（连续约 10 秒检测为空闲），通知后自动重启
-  - **立即重启**：马上重启，当前任务会中断。对话框会显示判断依据，如果你确认没有任务在运行（例如只是刚结束一次对话），可以直接选这个
-  - **稍后手动重启**：什么都不做，方便时退出 Codex 再从程序坞打开即可
+---
 
-  "正在执行任务"的判断方式：最近 30 秒内有会话记录写入，或 Codex 下有它启动的命令仍在运行（如构建、测试；随 Codex 一起启动的常驻服务不算）。这是启发式判断，个别情况可能误判，可在配置的 `busy` 中调整。
+## 工作原理
 
-组件依赖调试端口，而调试端口只能在 Codex 启动时开启，所以**必须从启动器打开**。启动器与原应用同名同图标，需要留意两点：Codex 运行时，程序坞里会同时出现两个相同的图标，固定的那个是启动器，带运行指示点的是 Codex 本身，这是正常的；用 Spotlight 或启动台搜索时会看到两个同名应用，位于 `~/Applications` 的是启动器，位于 `/Applications` 的是原应用。如果打开的是原应用、通过通知打开，或者 Codex 自动更新后自行重启，组件不会出现，退出 Codex 后再从程序坞打开即可。Codex 设置了开机自动打开的话，请到"系统设置 → 通用 → 登录项"里换成 `~/Applications` 下的启动器。
+工具不会修改 ChatGPT / Codex 安装包。
 
-日志位于 `~/Library/Logs/chatgpt-usage-visualizer.log`。移动了工具文件夹或重装了 Node 后，需要重新运行 `install`；不再需要时运行 `node bin/chatgpt-usage.js uninstall`。
+启动器会以类似下面的参数启动 Electron 桌面端：
 
-## 不同套餐
+```text
+--remote-debugging-port=9222
+```
 
-组件会按服务端实际返回的额度窗口来显示：同时有 5 小时和每周额度时显示两个；只有每周额度的套餐只显示每周一个；没有任何额度限制时显示"无限制"。
+然后工具通过本机 Chromium DevTools Protocol：
 
-## 图标样式
+```text
+127.0.0.1:9222
+```
 
-侧栏图标有四种样式可选，只改变外观，数据和功能完全一样：
+找到桌面端主窗口，并注入 `src/widget.js`。
 
-<img src="docs/styles.gif" width="240">
+额度数据优先来自 Codex 自带的：
 
-- **圆环**（默认）：圆环长度表示剩余比例
-- **沙漏**：木质框架的玻璃沙漏，上半部分的蓝色沙子是剩余额度。细沙会持续从瓶颈落下，额度被消耗时沙流更明显，额度重置时沙漏翻转。沙漏是收腰的，所以沙子的高度按玻璃的实际形状换算，看到的沙量和剩余比例一致
-- **咖啡**：咖啡液面是剩余额度，热气会飘起来，额度越少热气越少
-- **电池**：电量是剩余额度，额度偏低时变橙、变红；距离重置 10 分钟内出现闪电并开始"充电"闪烁，重置时电量重新充满
+```text
+codex app-server
+```
 
-切换方式：点开详情卡片，在"样式"一栏直接点选，立即生效并会被记住；也可以在 `~/.chatgpt-usage-visualizer/config.json` 中写入 `"style": "hourglass"`（可选 `ring`、`hourglass`、`coffee`、`battery`）作为默认样式。剩余额度低于 10% 时，沙漏的沙子会变成红色作为提醒。
+接口：
 
-## 时间显示方式
+```text
+account/rateLimits/read
+```
 
-点开详情卡片，在"时间"一栏可以选择：
+如果无法使用 app-server，则退回读取本地 `~/.codex/sessions` 中最近的额度快照。
 
-- **距重置**（默认）：显示倒计时，例如 `04:02:49`、`1天 04时`
-- **截止时间**：显示具体的重置时刻，今天显示 `00:18`，之后显示 `明天 00:18`、`周五 00:27`；详情卡片里同时给出还剩多久
+工具不会读取或上传登录凭证。
 
-时间标签会配合样式：
-
-| 样式 | 距重置 | 截止时间 |
-|---|---|---|
-| 圆环 | 距重置 | 重置时间 |
-| 沙漏 | 距翻转 | 翻转时间 |
-| 咖啡 | 距续杯 | 续杯时间 |
-| 电池 | 距充满 | 充满时间 |
-
-选择会被记住；也可以在配置文件中写入 `"timeDisplay": "deadline"` 作为默认（可选 `countdown`、`deadline`）。
-
-## 自动同步机制
-
-数据来自 Codex 自带的 `codex app-server`（`account/rateLimits/read` 接口）。工具会优先使用 Codex 桌面端安装包里自带的 codex 程序，不需要另外安装 Codex CLI；登录由 Codex 自己处理，本工具不读取、不保存任何凭证。以下时机会自动更新：
-
-- 启动时立即读取一次
-- 定时轮询：Codex 窗口在前台时每 60 秒，后台时每 5 分钟
-- 你在 Codex 中对话产生新记录时（监听 `~/.codex/sessions`，最多 15 秒一次）
-- 任一额度倒计时归零后 3 秒，确认服务端已重置
-- app-server 主动推送的额度变化
-
-找不到可用的 codex 程序时，会退回读取本地会话记录中的最后一次额度快照（只解析额度记录，不读取对话内容）。这种模式下数据只在你对话时更新，闲置一段时间后会提示"数据可能已过期"，倒计时归零后会显示"重置中…"直到下次对话。
-
-同步失败时按 30 秒、1 分钟、2 分钟……逐步拉长重试；超过 10 分钟没有新数据，圆环变灰并提示数据可能已过期。
+---
 
 ## 自定义配置
 
-在 `~/.chatgpt-usage-visualizer/config.json` 中写入需要覆盖的字段即可，其余沿用 `config/default.json`：
+配置文件：
+
+```text
+~/.chatgpt-usage-visualizer/config.json
+```
+
+例如：
 
 ```json
 {
   "appNames": ["ChatGPT", "Codex"],
+  "debugPort": 9222,
+  "style": "ring",
+  "timeDisplay": "countdown",
   "pollFocusedSec": 60,
   "pollBackgroundSec": 300,
-  "thresholds": { "warnRemainingPercent": 25, "dangerRemainingPercent": 10 },
-  "busy": { "recentWriteSec": 30, "commandGraceSec": 120, "pollSec": 5 },
-  "mount": {
-    "anchorSelectors": ["button[aria-label=\"用量\"]", "button[aria-label=\"Usage\"]"],
-    "levelsUp": 1,
-    "position": "before"
+  "thresholds": {
+    "warnRemainingPercent": 25,
+    "dangerRemainingPercent": 10
   }
 }
 ```
 
-剩余比例低于 `warnRemainingPercent` 时变为琥珀色，低于 `dangerRemainingPercent` 时变为红色。
+样式：
 
-## 命令一览
-
-```
-node bin/chatgpt-usage.js doctor      检查运行环境、调试端口、数据源
-node bin/chatgpt-usage.js install     创建启动器（--dock 替换程序坞图标，--launcher-name 自定义名称）
-node bin/chatgpt-usage.js uninstall   删除启动器，还原程序坞
-node bin/chatgpt-usage.js relaunch    15 秒后通过启动器重新打开 Codex
-node bin/chatgpt-usage.js start       手动启动（终端前台运行）
-
-选项：--app <应用名>  --launcher-name <名称>  --port <端口>  --codex-bin <路径>  --yes  --debug
+```text
+ring
+hourglass
+coffee
+battery
 ```
 
-## 常见问题
+时间显示：
 
-**组件没有出现。** 先确认是从程序坞的启动器（`~/Applications` 下）打开的 Codex，再查看日志 `~/Library/Logs/chatgpt-usage-visualizer.log`。
+```text
+countdown
+deadline
+```
 
-**日志提示"找不到挂载点"。** Codex 更新后界面结构变了。组件以系统"用量"按钮为锚点，通常只需更新 `mount.anchorSelectors`：用 Chrome 打开 `chrome://inspect/#devices`，Configure 中添加 `localhost:9222`，在地址为 `app://-/index.html` 的项下点 inspect，用元素选择器点一下用量按钮，查看它的 `aria-label` 等稳定属性，写进配置后重新打开。请避免使用 `Button-q1uiwE` 这类带随机后缀的类名，它们每次发版都会变。
+---
 
-**运行时报 `EPERM: process.cwd failed`。** 终端所在的目录已被删除或没有访问权限。先执行 `cd ~`，再进入工具目录重试；如果工具放在"下载"文件夹，建议移到用户主目录。
+## 开发与测试
 
-**doctor 显示 codex 程序报 `ENOENT`。** 你用 npm 安装的 Codex CLI 不完整，工具会自动跳过它、改用桌面端内置的程序。想修复 CLI 可以运行 `npm install -g @openai/codex`。
+项目要求 Node.js 22+。
 
-**`--app` 应该填什么？** 填 Codex 桌面应用的名字，可以用 `ls /Applications | grep -i -E "codex|chatgpt"` 查看，例如 `--app ChatGPT`。
+运行单测：
+
+```powershell
+npm test
+```
+
+Windows 和 macOS 都有 GitHub Actions 检查：
+
+- Node.js 语法检查
+- 单元测试
+
+---
 
 ## 安全说明
 
-- 调试端口只监听本机（127.0.0.1），但在 Codex 以调试模式运行期间，本机的其他程序也能连接并控制 Codex 窗口。请只在信任的电脑上使用。
-- 本工具不联网上传任何数据，不收集统计信息，不读取登录凭证。
-- 组件运行在独立的 Shadow DOM 中，不修改 Codex 的样式和安装包。
+调试端口仅绑定本机，但在桌面端以调试模式运行期间，本机其他进程理论上也可能访问这个调试接口。
 
-## 开发
+因此：
 
-```bash
-npm test                                   # 单元测试（含模拟 app-server）
-node bin/chatgpt-usage.js start --debug    # 输出详细日志
+- 只建议在自己的可信电脑上使用
+- 不要把调试端口暴露到公网
+- 本工具不会上传使用数据
+- 本工具不会读取 OpenAI 登录凭据
+
+---
+
+## Credits
+
+原始项目：
+
+```text
+ZGSQ-QIANG/chatgpt-usage-visualizer
 ```
 
-目录结构：`bin/` 命令行入口，`src/widget.js` 注入界面的组件，`src/sync.js` 自动同步，`src/appServer.js` app-server 客户端，`src/sessions.js` 会话记录读取，`src/cdp.js` 调试协议，`src/launcher.js` 启动器与程序坞，`src/busy.js` 任务检测，`src/commands.js` 各命令的实现，`config/default.json` 默认配置。
+Windows 支持 fork：
 
-欢迎提交 Issue 和 Pull Request，尤其是 Codex 更新后的选择器适配。
+```text
+sunc71/chatgpt-usage-visualizer
+```
 
-## 许可证
+---
 
-[MIT](LICENSE)
+## License
+
+MIT
